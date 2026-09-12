@@ -1,0 +1,8 @@
+{
+  "name": "AudioArc: AI Filmmaking Assistant 9-1-26",
+  "description": "Professional AI Filmmaking Assistant converting lyrics and audio into structured cinematic storyboards and scripts with support for Gemini, OpenAI, Ollama, LM Studio, OpenRouter, and Pollinations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
