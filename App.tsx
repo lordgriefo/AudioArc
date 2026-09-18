@@ -2737,9 +2737,14 @@ One-sentence scene summary:`;
     try {
       if (providerToTest === 'gemini') {
         const activeKey = getEffectiveGeminiKey();
-        if (!activeKey) throw new Error("Gemini API Key not found. Please enter your API key in Settings -> Gemini or Settings -> Connection.");
+        if (!activeKey) throw new Error("Gemini API Key not found. Please enter or paste your API key in the field above.");
         const ai = new GoogleGenAI({ apiKey: activeKey });
-        await ai.models.generateContent({ model: geminiMainModel || 'gemini-3.8-flash', contents: 'ping' });
+        await ai.models.generateContent({ 
+          model: geminiUtilityModel || geminiMainModel || 'gemini-3.8-flash', 
+          contents: 'ping',
+          config: { maxOutputTokens: 2 }
+        });
+        setApiKeyStatus('detected');
       } else if (providerToTest === 'openai') {
         if (!openAIKey.trim()) throw new Error("OpenAI API Key has not been entered.");
         let baseUrl = openAIBaseUrl.trim().replace(/\/$/, '');
@@ -2783,7 +2788,7 @@ One-sentence scene summary:`;
         if (!res.ok) throw new Error(`HTTP error ${res.status}: Could not reach Pollinations endpoint.`);
       }
       setTestStatuses(prev => ({ ...prev, [providerToTest]: 'ok' }));
-      setTimeout(() => setTestStatuses(prev => ({ ...prev, [providerToTest]: 'idle' })), 2000);
+      setTimeout(() => setTestStatuses(prev => ({ ...prev, [providerToTest]: 'idle' })), 4500);
     } catch (e: any) {
       setTestStatuses(prev => ({ ...prev, [providerToTest]: 'error' }));
       setConnectionError(`[${providerToTest.toUpperCase()}] Test Failed: ${e.message}`);
@@ -6649,23 +6654,60 @@ The old city. The weeping wall. Let's all go and remember.
                                                 Get free Gemini API Key <ExternalLink size={10}/>
                                             </a>
                                         </div>
-                                        <div className="relative flex items-center">
-                                            <input 
-                                                type={showGeminiKeySecret ? "text" : "password"} 
-                                                placeholder="Paste AIzaSy... API key here (persisted in browser)" 
-                                                value={geminiApiKey} 
-                                                onChange={e => handleUpdateGeminiKey(e.target.value)} 
-                                                className="w-full bg-black/40 border border-white/10 rounded p-2 text-sm outline-none focus:border-white/30 transition-colors pr-10 font-mono text-gray-200"
-                                            />
+                                        <div className="flex items-center gap-2">
+                                            <div className="relative flex-1 flex items-center">
+                                                <input 
+                                                    type={showGeminiKeySecret ? "text" : "password"} 
+                                                    placeholder="Paste AIzaSy... API key here (persisted in browser)" 
+                                                    value={geminiApiKey} 
+                                                    onChange={e => handleUpdateGeminiKey(e.target.value)} 
+                                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm outline-none focus:border-white/30 transition-colors pr-10 font-mono text-gray-200"
+                                                />
+                                                <button 
+                                                    type="button" 
+                                                    onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
+                                                    className="absolute right-2 p-1 text-gray-400 hover:text-gray-200" 
+                                                    title={showGeminiKeySecret ? "Hide API Key" : "Show API Key"}
+                                                >
+                                                    {showGeminiKeySecret ? <EyeOff size={14}/> : <Eye size={14}/>}
+                                                </button>
+                                            </div>
                                             <button 
-                                                type="button" 
-                                                onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
-                                                className="absolute right-2 p-1 text-gray-400 hover:text-gray-200" 
-                                                title={showGeminiKeySecret ? "Hide API Key" : "Show API Key"}
+                                                type="button"
+                                                onClick={() => handleTestConnection('gemini')}
+                                                disabled={testStatuses.gemini === 'testing'}
+                                                className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all shrink-0 ${
+                                                    testStatuses.gemini === 'testing'
+                                                        ? 'bg-blue-600/50 text-blue-200 cursor-wait'
+                                                        : testStatuses.gemini === 'ok'
+                                                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm'
+                                                        : testStatuses.gemini === 'error'
+                                                        ? 'bg-red-600 hover:bg-red-500 text-white shadow-sm'
+                                                        : 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm'
+                                                }`}
+                                                title="Perform a small non-destructive API ping to verify this Gemini key"
                                             >
-                                                {showGeminiKeySecret ? <EyeOff size={14}/> : <Eye size={14}/>}
+                                                {testStatuses.gemini === 'testing' ? (
+                                                    <><Loader2 size={13} className="animate-spin"/> Testing...</>
+                                                ) : testStatuses.gemini === 'ok' ? (
+                                                    <><Check size={13}/> Valid Key</>
+                                                ) : testStatuses.gemini === 'error' ? (
+                                                    <><X size={13}/> Test Failed</>
+                                                ) : (
+                                                    <><Zap size={13}/> Test Key</>
+                                                )}
                                             </button>
                                         </div>
+                                        {testStatuses.gemini === 'ok' && (
+                                            <p className="text-emerald-400 text-xs mt-1.5 flex items-center gap-1 font-medium animate-in fade-in">
+                                                <Check size={13} className="shrink-0 text-emerald-400"/> Key verified successfully! Gemini API is responding.
+                                            </p>
+                                        )}
+                                        {testStatuses.gemini === 'error' && connectionError && (
+                                            <p className="text-red-400 text-xs mt-1.5 flex items-center gap-1.5 bg-red-900/30 p-2 rounded border border-red-500/30 leading-tight animate-in fade-in">
+                                                <AlertTriangle size={13} className="shrink-0 text-red-400"/> {connectionError}
+                                            </p>
+                                        )}
                                         <div className="flex items-center justify-between mt-1">
                                             <span className="text-[11px] text-gray-500">
                                                 Required when deployed to Vercel, Netlify, or running standalone.
@@ -7073,55 +7115,78 @@ The old city. The weeping wall. Let's all go and remember.
                                                 Get a free Gemini API Key <ExternalLink size={11}/>
                                             </a>
                                         </div>
-                                        <div className="relative flex items-center">
-                                            <input 
-                                                type={showGeminiKeySecret ? "text" : "password"} 
-                                                placeholder="Paste your AIzaSy... key here" 
-                                                value={geminiApiKey} 
-                                                onChange={e => handleUpdateGeminiKey(e.target.value)} 
-                                                className="w-full bg-black/40 border border-white/10 rounded p-2 text-sm outline-none focus:border-white/30 transition-colors pr-10 font-mono text-gray-200"
-                                            />
+                                        <div className="flex items-center gap-2">
+                                            <div className="relative flex-1 flex items-center">
+                                                <input 
+                                                    type={showGeminiKeySecret ? "text" : "password"} 
+                                                    placeholder="Paste your AIzaSy... key here" 
+                                                    value={geminiApiKey} 
+                                                    onChange={e => handleUpdateGeminiKey(e.target.value)} 
+                                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm outline-none focus:border-white/30 transition-colors pr-10 font-mono text-gray-200"
+                                                />
+                                                <button 
+                                                    type="button" 
+                                                    onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
+                                                    className="absolute right-2 p-1 text-gray-400 hover:text-gray-200" 
+                                                    title={showGeminiKeySecret ? "Hide API Key" : "Show API Key"}
+                                                >
+                                                    {showGeminiKeySecret ? <EyeOff size={14}/> : <Eye size={14}/>}
+                                                </button>
+                                            </div>
                                             <button 
-                                                type="button" 
-                                                onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
-                                                className="absolute right-2 p-1 text-gray-400 hover:text-gray-200" 
-                                                title={showGeminiKeySecret ? "Hide API Key" : "Show API Key"}
+                                                type="button"
+                                                onClick={() => handleTestConnection('gemini')} 
+                                                disabled={testStatuses.gemini === 'testing'}
+                                                className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all shrink-0 ${
+                                                    testStatuses.gemini === 'testing'
+                                                        ? 'bg-blue-600/50 text-blue-200 cursor-wait'
+                                                        : testStatuses.gemini === 'ok'
+                                                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm'
+                                                        : testStatuses.gemini === 'error'
+                                                        ? 'bg-red-600 hover:bg-red-500 text-white shadow-sm'
+                                                        : 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm'
+                                                }`}
+                                                title="Perform a small non-destructive API ping to verify this Gemini key"
                                             >
-                                                {showGeminiKeySecret ? <EyeOff size={14}/> : <Eye size={14}/>}
+                                                {testStatuses.gemini === 'testing' ? (
+                                                    <><Loader2 size={13} className="animate-spin"/> Testing...</>
+                                                ) : testStatuses.gemini === 'ok' ? (
+                                                    <><Check size={13}/> Valid Key</>
+                                                ) : testStatuses.gemini === 'error' ? (
+                                                    <><X size={13}/> Test Failed</>
+                                                ) : (
+                                                    <><Zap size={13}/> Test Key</>
+                                                )}
                                             </button>
                                         </div>
-                                    </div>
 
-                                    <div className="flex flex-col sm:flex-row gap-2 pt-1">
-                                        <button 
-                                            onClick={() => handleTestConnection('gemini')} 
-                                            className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-2"
-                                            disabled={testStatuses.gemini === 'testing'}
-                                        >
-                                            {testStatuses.gemini === 'testing' ? (
-                                                <><Loader2 size={14} className="animate-spin"/> Testing Connection...</>
-                                            ) : testStatuses.gemini === 'ok' ? (
-                                                <><Check size={14} className="text-green-300"/> Key Verified & Working!</>
-                                            ) : testStatuses.gemini === 'error' ? (
-                                                <><X size={14} className="text-red-300"/> Test Failed (Click to Retry)</>
-                                            ) : (
-                                                <><Zap size={14} className="text-yellow-300"/> Test Key Connection</>
-                                            )}
-                                        </button>
+                                        {testStatuses.gemini === 'ok' && (
+                                            <p className="text-emerald-400 text-xs mt-1.5 flex items-center gap-1 font-medium animate-in fade-in">
+                                                <Check size={13} className="shrink-0 text-emerald-400"/> Key verified successfully! Gemini API is responding.
+                                            </p>
+                                        )}
+                                        {testStatuses.gemini === 'error' && connectionError && (
+                                            <p className="text-red-400 text-xs mt-1.5 flex items-center gap-1.5 bg-red-900/30 p-2 rounded border border-red-500/30 leading-tight animate-in fade-in">
+                                                <AlertTriangle size={13} className="shrink-0 text-red-400"/> {connectionError}
+                                            </p>
+                                        )}
 
                                         {typeof window !== 'undefined' && (window as any).aistudio && (
-                                            <button 
-                                                onClick={async () => {
-                                                    if ((window as any).aistudio) {
-                                                        await (window as any).aistudio.openSelectKey();
-                                                        setApiKeyStatus('detected');
-                                                        setHasPaidKey(true);
-                                                    }
-                                                }}
-                                                className="py-2 px-3 bg-white/10 hover:bg-white/20 border border-white/10 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                                            >
-                                                <Key size={14} /> AI Studio Key Selector
-                                            </button>
+                                            <div className="pt-2">
+                                                <button 
+                                                    type="button"
+                                                    onClick={async () => {
+                                                        if ((window as any).aistudio) {
+                                                            await (window as any).aistudio.openSelectKey();
+                                                            setApiKeyStatus('detected');
+                                                            setHasPaidKey(true);
+                                                        }
+                                                    }}
+                                                    className="w-full py-2 px-3 bg-white/10 hover:bg-white/20 border border-white/10 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                                                >
+                                                    <Key size={14} /> AI Studio Key Selector
+                                                </button>
+                                            </div>
                                         )}
                                     </div>
 
