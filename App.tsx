@@ -1,6 +1,6 @@
 
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GoogleGenAI, Type } from "@google/genai";
 import { 
   Clapperboard, Music, Video, Sparkles, Save, History, Settings, 
@@ -13,7 +13,8 @@ import {
   Undo, Redo, ArrowUp, ArrowDown, CreditCard, ExternalLink, HelpCircle, Upload, Volume2, Smile, Palette, Layers,
   Maximize2, Link as LinkIcon, Paperclip, Printer, User, Cloud, SkipBack, SkipForward,
   FileJson, FileArchive, VideoIcon, UserPlus, Cpu, BookOpen, Mic, Coffee, Key,
-  SlidersHorizontal, BookmarkPlus, ArrowLeftRight, UserCheck, Tag, Compass, Bot, LayoutGrid, Merge, Contrast
+  SlidersHorizontal, BookmarkPlus, ArrowLeftRight, UserCheck, Tag, Compass, Bot, LayoutGrid, Merge, Contrast,
+  Eye, EyeOff
 } from 'lucide-react';
 import JSZip from 'jszip';
 import * as idb from 'idb-keyval';
@@ -638,6 +639,61 @@ export const App: React.FC = () => {
   const [provider, setProvider] = useState<'gemini' | 'openai' | 'ollama' | 'lmstudio' | 'openrouter' | 'pollinations'>('gemini');
   const [apiKeyStatus, setApiKeyStatus] = useState<'detected' | 'not_found'>('not_found');
   // Gemini
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('audioarc_gemini_key');
+      if (saved) return saved;
+    } catch {}
+    try {
+      if (typeof process !== 'undefined' && process.env) {
+        if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+        if (process.env.API_KEY) return process.env.API_KEY;
+      }
+    } catch {}
+    try {
+      if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
+        if ((import.meta as any).env.VITE_GEMINI_API_KEY) return (import.meta as any).env.VITE_GEMINI_API_KEY;
+        if ((import.meta as any).env.GEMINI_API_KEY) return (import.meta as any).env.GEMINI_API_KEY;
+      }
+    } catch {}
+    return '';
+  });
+
+  const getEffectiveGeminiKey = useCallback((): string => {
+    if (geminiApiKey && geminiApiKey.trim()) return geminiApiKey.trim();
+    try {
+      if (typeof process !== 'undefined' && process.env) {
+        if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
+        if (process.env.API_KEY) return process.env.API_KEY;
+      }
+    } catch {}
+    try {
+      if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
+        if ((import.meta as any).env.VITE_GEMINI_API_KEY) return (import.meta as any).env.VITE_GEMINI_API_KEY;
+        if ((import.meta as any).env.GEMINI_API_KEY) return (import.meta as any).env.GEMINI_API_KEY;
+      }
+    } catch {}
+    return '';
+  }, [geminiApiKey]);
+
+  const [showGeminiKeySecret, setShowGeminiKeySecret] = useState<boolean>(false);
+
+  const handleUpdateGeminiKey = useCallback((newKey: string) => {
+    const clean = newKey.trim();
+    setGeminiApiKey(clean);
+    if (clean) {
+      try {
+        localStorage.setItem('audioarc_gemini_key', clean);
+      } catch {}
+      setApiKeyStatus('detected');
+    } else {
+      try {
+        localStorage.removeItem('audioarc_gemini_key');
+      } catch {}
+      const fallback = (typeof process !== 'undefined' && process.env && (process.env.GEMINI_API_KEY || process.env.API_KEY)) || '';
+      setApiKeyStatus(fallback ? 'detected' : 'not_found');
+    }
+  }, []);
   const [geminiMainModel, setGeminiMainModel] = useState<string>('gemini-3.8-flash');
   const [geminiUtilityModel, setGeminiUtilityModel] = useState<string>('gemini-3.1-flash-lite');
   // Image Generation
@@ -845,7 +901,8 @@ export const App: React.FC = () => {
         setSceneSplitThreshold(parseInt(savedSplitThreshold));
     }
 
-    if (process.env.GEMINI_API_KEY) {
+    const activeKey = getEffectiveGeminiKey();
+    if (activeKey) {
         setApiKeyStatus('detected');
     } else {
         setApiKeyStatus('not_found');
@@ -855,7 +912,12 @@ export const App: React.FC = () => {
         }
     }
 
-  }, []);
+  }, [getEffectiveGeminiKey]);
+
+  useEffect(() => {
+    const key = getEffectiveGeminiKey();
+    setApiKeyStatus(key ? 'detected' : 'not_found');
+  }, [geminiApiKey, getEffectiveGeminiKey]);
 
   // --- Local Storage Persistence ---
   const useDebouncedStorage = (key: string, value: any, delay: number = 300, useIdb: boolean = false) => {
@@ -1068,8 +1130,10 @@ export const App: React.FC = () => {
   };
 
   const checkKeysAndShowSettings = () => {
-    if (provider === 'gemini' && !process.env.GEMINI_API_KEY) {
-        setErrorMessage("Gemini API Key not found. Please ensure it is configured correctly in your environment variables.");
+    if (provider === 'gemini' && !getEffectiveGeminiKey()) {
+        setErrorMessage("Gemini API Key not found. Please enter your API key in Settings -> Gemini or Settings -> Connection.");
+        setShowSettings(true);
+        setSettingsTab('config');
         return false;
     }
     if (provider === 'openrouter' && (!openRouterKey.trim() || !openRouterUrl.trim())) {
@@ -1565,7 +1629,7 @@ Output ONLY a valid JSON array of objects with keys: "lyric", "beat" (a one-sent
   
       let beatSheetJsonText = '';
       if (provider === 'gemini') {
-        const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+        const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
         const beatSheetResult = await ai.models.generateContent({
           model: geminiUtilityModel,
           contents: beatSheetPrompt,
@@ -1639,7 +1703,7 @@ IMPORTANT: Respond with ONLY a valid, complete JSON array of scene objects. Do n
         let batchJsonText = '';
         try {
             if (provider === 'gemini') {
-                const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+                const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
                 const batchResult = await ai.models.generateContent({
                     model: geminiMainModel,
                     contents: batchPrompt,
@@ -1744,7 +1808,7 @@ IMPORTANT: Respond with ONLY a valid, complete JSON array of scene objects. Do n
         const influenceList = getInfluenceDescriptions(selectedInfluences, customInfluences);
         const referenceContext = visualRefs.length > 0 ? `CASTING DIRECTIVE:\nMain Characters:\n${visualRefs.map((r, i) => `CHARACTER ${i+1}: "${r.name}" - Appearance: ${r.description}`).join('\n')}\n` : "";
 
-        const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+        const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
         const exactDuration = Math.floor(audioDuration);
         
         // --- STEP 1: Audio Breakdown ---
@@ -2189,7 +2253,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
           const base64Data = base64.split(',')[1];
           
           if (provider === 'gemini') {
-              const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+              const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
               const analysisPromise = (async () => {
                   const res = await ai.models.generateContent({ 
                       model: geminiUtilityModel, 
@@ -2475,8 +2539,8 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
 
   const generateTextWithActiveAI = async (prompt: string, isJson = false): Promise<string> => {
     if (provider === 'gemini') {
-      const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
-      if (!apiKey) throw new Error("Gemini API key is not configured.");
+      const apiKey = getEffectiveGeminiKey();
+      if (!apiKey) throw new Error("Gemini API key is not configured. Please set your key in Settings.");
       const ai = new GoogleGenAI({ apiKey });
       const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
       updateUsage(res);
@@ -2612,8 +2676,9 @@ One-sentence scene summary:`;
     setConnectionError(null);
     try {
         if (provider === 'gemini') {
-            if (!(process.env.GEMINI_API_KEY || process.env.API_KEY)) throw new Error("Gemini API Key not found in environment variables.");
-            const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+            const activeKey = getEffectiveGeminiKey();
+            if (!activeKey) throw new Error("Gemini API Key not found. Please enter your API key in Settings -> Gemini or Settings -> Connection.");
+            const ai = new GoogleGenAI({ apiKey: activeKey });
             await ai.models.generateContent({ model: geminiUtilityModel, contents: 'ping' });
         } else if (provider === 'ollama') {
             const res = await fetch(`${ollamaUrl.replace(/\/$/, '')}/api/tags`);
@@ -2671,8 +2736,9 @@ One-sentence scene summary:`;
     setConnectionError(null);
     try {
       if (providerToTest === 'gemini') {
-        if (!process.env.GEMINI_API_KEY) throw new Error("Gemini API Key not found in environment variables.");
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const activeKey = getEffectiveGeminiKey();
+        if (!activeKey) throw new Error("Gemini API Key not found. Please enter your API key in Settings -> Gemini or Settings -> Connection.");
+        const ai = new GoogleGenAI({ apiKey: activeKey });
         await ai.models.generateContent({ model: geminiMainModel || 'gemini-3.8-flash', contents: 'ping' });
       } else if (providerToTest === 'openai') {
         if (!openAIKey.trim()) throw new Error("OpenAI API Key has not been entered.");
@@ -2866,7 +2932,7 @@ One-sentence scene summary:`;
         
         let titlePage = '';
         if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
             const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: titlePrompt });
             titlePage = res.text || '';
             updateUsage(res);
@@ -2914,7 +2980,7 @@ One-sentence scene summary:`;
 
             let batchText = '';
             if (provider === 'gemini') {
-                const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+                const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
                 const streamResponse = await ai.models.generateContentStream({ model: geminiMainModel, contents: batchPrompt });
                 for await (const chunk of streamResponse) {
                     if (stopRef.current) break;
@@ -2965,7 +3031,7 @@ One-sentence scene summary:`;
         
         let rawResponse = '';
         if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
             const systemInstruction = `You are an expert cinematographer. Regenerate prompts for this single scene, making them more vivid and detailed, while STRICTLY following the core directives.
 **CORE VISUAL DIRECTIVES (MANDATORY):**
 1.  **CHARACTER INTEGRITY:** The characters in the 'CASTING' section MUST be depicted exactly as described.
@@ -3046,7 +3112,7 @@ Output ONLY the JSON data.`;
 
         let newPromptText = '';
         if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
             const result = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
             newPromptText = result.text || '';
             updateUsage(result);
@@ -3112,7 +3178,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
 
         let rawResponse = '';
         if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
             const result = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
             rawResponse = result.text || '';
             updateUsage(result);
@@ -3179,8 +3245,9 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
         base64Data = data.data?.[0]?.b64_json;
         mimeType = 'image/png';
       } else {
-        if (!process.env.GEMINI_API_KEY) throw new Error("Google API Key is required for image generation.");
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const activeKey = getEffectiveGeminiKey();
+        if (!activeKey) throw new Error("Google API Key is required for image generation. Please enter it in Settings.");
+        const ai = new GoogleGenAI({ apiKey: activeKey });
   
         if (imageEngine === 'imagen') {
           mimeType = imageFormat;
@@ -3309,7 +3376,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
       const prompt = `Rewrite video prompt: "${originalPrompt}" to embody "${instruction}" technique. Keep it concise. Output raw text.`;
       let newPrompt = '';
       if (provider === 'gemini') { 
-        const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! }); 
+        const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() }); 
         const res = await ai.models.generateContent({ model: geminiMainModel, contents: prompt }); 
         newPrompt = res.text || ''; 
         updateUsage(res); 
@@ -3620,7 +3687,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
         const prompt = `Act as a master cinematographer. Provide a concise description of the style or vibe described by: "${customModalName}". Focus on lighting, color palette, camera movement, and aesthetic mood. This will be used in an influence library for a filmmaker.`;
         let text = '';
         if (provider === 'gemini') { 
-          const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! }); 
+          const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() }); 
           const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt }); 
           text = res.text || ''; 
           updateUsage(res); 
@@ -3647,7 +3714,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
         const prompt = `Describe the visual style of "${customModalName}" in one concise paragraph for a film director. Focus on lighting, colors, camera work, and mood.`;
         let text = '';
         if (provider === 'gemini') { 
-          const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! }); 
+          const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() }); 
           const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt }); 
           text = res.text || ''; 
           updateUsage(res); 
@@ -3670,7 +3737,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
       const prompt = `Create a detailed, specific, and consistent physical description for a character named "${characterModalName}". Focus on concrete visual details like age, face shape, hair style and color, eye color, build, and distinctive features. This description will be used to ensure visual continuity in an AI image generator. Output only the description.`;
       let text = '';
       if (provider === 'gemini') {
-        const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+        const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
         const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
         text = res.text || '';
         updateUsage(res);
@@ -3842,7 +3909,7 @@ Return ONLY a JSON object with keys:
 
             let rawJson = '';
             if (provider === 'gemini') {
-              const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+              const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
               const res = await ai.models.generateContent({
                 model: geminiUtilityModel,
                 contents: adaptPrompt,
@@ -4013,7 +4080,7 @@ Output ONLY valid JSON with keys:
       try {
         let rawJson = '';
         if (provider === 'gemini') {
-          const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+          const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
           const res = await ai.models.generateContent({
             model: geminiUtilityModel,
             contents: adaptPrompt,
@@ -4620,7 +4687,8 @@ Output ONLY valid JSON with keys:
     setStoryboard(prev => prev ? prev.map(s => s.id === sceneId ? { ...s, videoStatus: 'generating' } : s) : null);
 
     try {
-        const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+        const gemKey = getEffectiveGeminiKey();
+        const ai = new GoogleGenAI({ apiKey: gemKey });
         let operation = await ai.models.generateVideos({
             model: 'veo-3.1-fast-generate-preview',
             prompt: prompt,
@@ -4648,7 +4716,7 @@ Output ONLY valid JSON with keys:
         const response = await fetch(downloadLink, {
             method: 'GET',
             headers: {
-                'x-goog-api-key': (process.env.GEMINI_API_KEY || process.env.API_KEY)!,
+                'x-goog-api-key': gemKey,
             },
         });
         if (!response.ok) {
@@ -4720,7 +4788,7 @@ ${JSON.stringify(simplifiedBatch, null, 2)}
 
             let revisedJsonText = '';
             if (provider === 'gemini') {
-                const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+                const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
                 const result = await ai.models.generateContent({
                     model: geminiMainModel,
                     contents: prompt,
@@ -5101,6 +5169,17 @@ ${JSON.stringify(simplifiedBatch, null, 2)}
                 <button onClick={() => setShowHistory(true)} className="p-2 rounded hover:bg-white/10 border border-transparent hover:border-white/10 transition-all" title="History"><History size={20}/></button>
                 <button onClick={() => setShowSavedScenes(true)} className="p-2 rounded hover:bg-white/10 border border-transparent hover:border-white/10 transition-all" title="Saved Scenes"><Bookmark size={20}/></button>
                 <button onClick={() => setShowResources(true)} className="p-2 rounded hover:bg-white/10 border border-transparent hover:border-white/10 transition-all text-green-400 hover:text-green-300" title="External Resources"><LinkIcon size={20}/></button>
+                <button 
+                  onClick={() => { setShowSettings(true); setSettingsTab('billing'); }} 
+                  className={`p-2 rounded border transition-all ${
+                    apiKeyStatus === 'not_found' && provider === 'gemini'
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 animate-pulse' 
+                      : 'hover:bg-white/10 border-transparent hover:border-white/10 text-gray-300 hover:text-white'
+                  }`} 
+                  title={apiKeyStatus === 'not_found' && provider === 'gemini' ? "Google API Key Required — Click to enter key" : "API Keys & Connection Settings"}
+                >
+                  <Key size={19}/>
+                </button>
                 <button onClick={() => setShowSettings(true)} className="p-2 rounded hover:bg-white/10 border border-transparent hover:border-white/10 transition-all" title="Settings"><Settings size={20}/></button>
                 <button onClick={() => setShowManual(true)} className="p-2 rounded hover:bg-white/10 border border-transparent hover:border-white/10 transition-all" title="User Manual"><HelpCircle size={20}/></button>
             </div>
@@ -5110,6 +5189,102 @@ ${JSON.stringify(simplifiedBatch, null, 2)}
       <div className="flex-1 overflow-y-auto relative z-10 custom-scrollbar">
         <main className="grid grid-cols-1 md:grid-cols-12 gap-6 px-6 pt-6 pb-6 max-w-[1920px] mx-auto w-full min-h-full">
             
+            {/* Quick Setup Banner: Prominently displayed if Gemini API key is missing on Vercel / standalone hosting */}
+            {provider === 'gemini' && apiKeyStatus === 'not_found' && (
+              <div className="col-span-1 md:col-span-12 bg-gradient-to-r from-blue-950/90 via-indigo-950/80 to-purple-950/80 border border-blue-500/40 rounded-2xl p-5 shadow-2xl backdrop-blur-md animate-in fade-in slide-in-from-top-3">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3.5">
+                    <div className="w-10 h-10 rounded-xl bg-blue-500/20 border border-blue-400/30 flex items-center justify-center shrink-0 text-blue-300">
+                      <Key size={20} />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="text-base font-bold text-white">
+                          Google Gemini API Key Required
+                        </h3>
+                        <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 border border-blue-500/30">
+                          Vercel / Standalone Deployment
+                        </span>
+                      </div>
+                      <p className="text-xs text-gray-300 mt-1 max-w-2xl leading-relaxed">
+                        To generate storyboards, scene prompts, and visuals on your Vercel deployment, paste your Google Gemini API key below. It will be saved securely in your browser's local storage and used immediately.
+                      </p>
+                    </div>
+                  </div>
+
+                  <a 
+                    href="https://aistudio.google.com/app/apikey" 
+                    target="_blank" 
+                    rel="noopener noreferrer" 
+                    className="self-start lg:self-center text-xs text-blue-300 hover:text-white bg-blue-500/20 hover:bg-blue-500/30 px-3 py-1.5 rounded-lg border border-blue-400/30 flex items-center gap-1.5 transition-colors shrink-0 font-medium"
+                  >
+                    <span>Get a free API Key</span>
+                    <ExternalLink size={12} />
+                  </a>
+                </div>
+
+                {/* Inline Quick Key Input Form */}
+                <div className="mt-4 pt-4 border-t border-white/10 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                  <div className="relative flex-1">
+                    <input 
+                      type={showGeminiKeySecret ? "text" : "password"}
+                      placeholder="Paste your Gemini API key (AIzaSy...) here"
+                      value={geminiApiKey}
+                      onChange={(e) => handleUpdateGeminiKey(e.target.value)}
+                      className="w-full bg-black/60 border border-white/15 rounded-xl px-3.5 py-2.5 text-sm font-mono text-white placeholder-gray-500 outline-none focus:border-blue-400/70 focus:ring-1 focus:ring-blue-400 transition-all pr-10"
+                    />
+                    <button 
+                      type="button" 
+                      onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white transition-colors"
+                      title={showGeminiKeySecret ? "Hide key" : "Show key"}
+                    >
+                      {showGeminiKeySecret ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+
+                  <button
+                    onClick={async () => {
+                      if (!geminiApiKey.trim()) {
+                        alert("Please paste your Gemini API key first.");
+                        return;
+                      }
+                      handleUpdateGeminiKey(geminiApiKey.trim());
+                      await handleTestConnection('gemini');
+                    }}
+                    disabled={testStatuses.gemini === 'testing'}
+                    className="px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-blue-600/30 transition-all flex items-center justify-center gap-2 shrink-0 disabled:opacity-50"
+                  >
+                    {testStatuses.gemini === 'testing' ? (
+                      <><Loader2 size={14} className="animate-spin" /> Verifying Key...</>
+                    ) : testStatuses.gemini === 'ok' ? (
+                      <><Check size={14} className="text-emerald-300" /> Key Connected!</>
+                    ) : (
+                      <><Sparkles size={14} /> Save & Connect Key</>
+                    )}
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setShowSettings(true);
+                      setSettingsTab('billing');
+                    }}
+                    className="px-3.5 py-2.5 bg-white/5 hover:bg-white/10 text-gray-300 hover:text-white border border-white/10 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 shrink-0"
+                    title="Open Full API Settings"
+                  >
+                    <Settings size={14} /> Full Settings
+                  </button>
+                </div>
+
+                {connectionError && (
+                  <p className="text-red-400 text-xs mt-3 bg-red-950/40 p-2.5 rounded-lg border border-red-500/30 flex items-center gap-2">
+                    <AlertTriangle size={14} className="shrink-0" />
+                    <span>{connectionError}</span>
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="md:col-span-4 flex flex-col gap-4">
                 <div className="bg-[#121212] border border-white/10 rounded-xl p-1 flex flex-col shadow-2xl relative group shrink-0">
                     <div className="bg-white/5 px-4 py-3 rounded-t-lg flex justify-between items-center border-b border-white/5">
@@ -6433,9 +6608,18 @@ The old city. The weeping wall. Let's all go and remember.
                     <button onClick={() => setShowSettings(false)}><X size={20}/></button>
                 </div>
                 <div className="flex border-b border-white/10">
-                    <button onClick={()=>setSettingsTab('config')} className={`flex-1 p-3 text-sm font-bold ${settingsTab === 'config' ? 'bg-white/5 text-white' : 'text-gray-500 hover:bg-white/5'}`}>Configuration</button>
-                    <button onClick={()=>setSettingsTab('billing')} className={`flex-1 p-3 text-sm font-bold ${settingsTab === 'billing' ? 'bg-white/5 text-white' : 'text-gray-500 hover:bg-white/5'}`}>API & Billing</button>
-                    <button onClick={()=>setSettingsTab('guide')} className={`flex-1 p-3 text-sm font-bold ${settingsTab === 'guide' ? 'bg-white/5 text-white' : 'text-gray-500 hover:bg-white/5'}`}>Connection Guides</button>
+                    <button onClick={()=>setSettingsTab('config')} className={`flex-1 p-3 text-sm font-bold flex items-center justify-center gap-1.5 ${settingsTab === 'config' ? 'bg-white/5 text-white border-b-2 border-blue-500' : 'text-gray-400 hover:bg-white/5'}`}>
+                      <SlidersHorizontal size={14}/> Configuration
+                    </button>
+                    <button onClick={()=>setSettingsTab('billing')} className={`flex-1 p-3 text-sm font-bold flex items-center justify-center gap-1.5 ${settingsTab === 'billing' ? 'bg-white/5 text-white border-b-2 border-blue-500' : 'text-gray-400 hover:bg-white/5'}`}>
+                      <Key size={14}/> API Keys & Credentials
+                      {provider === 'gemini' && apiKeyStatus === 'not_found' && (
+                        <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse ml-1" />
+                      )}
+                    </button>
+                    <button onClick={()=>setSettingsTab('guide')} className={`flex-1 p-3 text-sm font-bold flex items-center justify-center gap-1.5 ${settingsTab === 'guide' ? 'bg-white/5 text-white border-b-2 border-blue-500' : 'text-gray-400 hover:bg-white/5'}`}>
+                      <BookOpen size={14}/> Connection Guides
+                    </button>
                 </div>
                 <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
                     {settingsTab === 'config' ? (
@@ -6451,16 +6635,51 @@ The old city. The weeping wall. Let's all go and remember.
                                     <button onClick={()=>setProvider('pollinations')} className={`px-2 py-2 rounded-lg border text-[10px] font-bold transition-colors flex items-center justify-center gap-1 ${provider === 'pollinations' ? 'bg-pink-900/40 border-pink-500/50 text-pink-300' : 'border-white/10 bg-black/20 hover:bg-white/10'}`}><Zap size={12}/> Pollinations</button>
                                 </div>
                                 
-                                <div className="bg-[#1a1a1a] p-4 rounded-lg border border-white/10 mt-6">
-                                    <h4 className="font-bold text-gray-200 mb-3 text-sm flex items-center gap-2"><Layers size={14}/> Audio Intelligence</h4>
-                                    <div>
-                                        <label className="block text-xs font-bold text-gray-400 mb-2">Scene Splitting Sensitivity ({sceneSplitThreshold})</label>
-                                        <input type="range" min="0" max="100" value={sceneSplitThreshold} onChange={e=>setSceneSplitThreshold(parseInt(e.target.value))} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500"/>
-                                    </div>
-                                </div>
-                                
                                 {provider === 'gemini' && (
                                   <div className="space-y-4">
+                                    <div>
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="text-xs font-bold text-gray-400">Gemini API Key</label>
+                                            <a 
+                                                href="https://aistudio.google.com/app/apikey" 
+                                                target="_blank" 
+                                                rel="noopener noreferrer" 
+                                                className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1 underline"
+                                            >
+                                                Get free Gemini API Key <ExternalLink size={10}/>
+                                            </a>
+                                        </div>
+                                        <div className="relative flex items-center">
+                                            <input 
+                                                type={showGeminiKeySecret ? "text" : "password"} 
+                                                placeholder="Paste AIzaSy... API key here (persisted in browser)" 
+                                                value={geminiApiKey} 
+                                                onChange={e => handleUpdateGeminiKey(e.target.value)} 
+                                                className="w-full bg-black/40 border border-white/10 rounded p-2 text-sm outline-none focus:border-white/30 transition-colors pr-10 font-mono text-gray-200"
+                                            />
+                                            <button 
+                                                type="button" 
+                                                onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
+                                                className="absolute right-2 p-1 text-gray-400 hover:text-gray-200" 
+                                                title={showGeminiKeySecret ? "Hide API Key" : "Show API Key"}
+                                            >
+                                                {showGeminiKeySecret ? <EyeOff size={14}/> : <Eye size={14}/>}
+                                            </button>
+                                        </div>
+                                        <div className="flex items-center justify-between mt-1">
+                                            <span className="text-[11px] text-gray-500">
+                                                Required when deployed to Vercel, Netlify, or running standalone.
+                                            </span>
+                                            {geminiApiKey && (
+                                                <button 
+                                                    onClick={() => handleUpdateGeminiKey('')} 
+                                                    className="text-[11px] text-gray-400 hover:text-red-400 transition-colors"
+                                                >
+                                                    Clear Key
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
                                     <div className="flex items-end gap-2">
                                         <div className="flex-1">
                                             <div className="flex justify-between items-center mb-1">
@@ -6740,6 +6959,14 @@ The old city. The weeping wall. Let's all go and remember.
                                 </div>
                                 <p className="text-xs text-gray-500 mt-1">Select your preferred video generation service. 'Google Veo' is integrated directly. Other services will open in a new tab with the prompt copied to your clipboard.</p>
                             </div>
+
+                            <div className="bg-[#1a1a1a] p-4 rounded-lg border border-white/10">
+                                <h4 className="font-bold text-gray-200 mb-3 text-sm flex items-center gap-2"><Layers size={14}/> Audio Intelligence</h4>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-400 mb-2">Scene Splitting Sensitivity ({sceneSplitThreshold})</label>
+                                    <input type="range" min="0" max="100" value={sceneSplitThreshold} onChange={e=>setSceneSplitThreshold(parseInt(e.target.value))} className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-blue-500"/>
+                                </div>
+                            </div>
                         </div>
                     ) : settingsTab === 'billing' ? (
                        <div className="space-y-6">
@@ -6808,38 +7035,102 @@ The old city. The weeping wall. Let's all go and remember.
                             </div>
 
                             <div className="bg-[#1a1a1a] p-4 rounded-lg border border-white/10">
-                                <h5 className="font-bold text-gray-200 mb-2 text-sm flex items-center gap-2">1. API Key Status</h5>
+                                <h5 className="font-bold text-gray-200 mb-2 text-sm flex items-center gap-2">1. Google Gemini API Key Configuration</h5>
                                 <div className="flex flex-col gap-3">
-                                    <div className="flex items-center gap-3">
-                                        {apiKeyStatus === 'detected' ? (
-                                            <div className="flex items-center gap-2 text-green-400">
-                                                <ShieldCheck size={18} />
-                                                <span className="font-bold">Gemini API Key Detected</span>
-                                            </div>
-                                        ) : (
-                                            <div className="flex items-center gap-2 text-red-400">
-                                                <AlertTriangle size={18} />
-                                                <span className="font-bold">Gemini API Key Not Found</span>
-                                            </div>
+                                    <div className="flex items-center justify-between">
+                                        <div className="flex items-center gap-3">
+                                            {apiKeyStatus === 'detected' ? (
+                                                <div className="flex items-center gap-2 text-green-400">
+                                                    <ShieldCheck size={18} />
+                                                    <span className="font-bold">Gemini API Key Active</span>
+                                                </div>
+                                            ) : (
+                                                <div className="flex items-center gap-2 text-red-400">
+                                                    <AlertTriangle size={18} />
+                                                    <span className="font-bold">Gemini API Key Not Found</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                        {geminiApiKey && (
+                                            <button 
+                                                onClick={() => handleUpdateGeminiKey('')} 
+                                                className="text-xs text-gray-400 hover:text-red-400 transition-colors"
+                                            >
+                                                Clear Saved Key
+                                            </button>
                                         )}
                                     </div>
 
-                                    <button 
-                                        onClick={async () => {
-                                            if (window.aistudio) {
-                                                await window.aistudio.openSelectKey();
-                                                setApiKeyStatus('detected');
-                                                setHasPaidKey(true);
-                                            }
-                                        }}
-                                        className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-2"
-                                    >
-                                        <Key size={14} /> Select / Update Gemini API Key
-                                    </button>
+                                    <div>
+                                        <div className="flex justify-between items-center mb-1">
+                                            <label className="text-xs font-bold text-gray-400">Enter / Paste Gemini API Key</label>
+                                            <a 
+                                                href="https://aistudio.google.com/app/apikey" 
+                                                target="_blank" 
+                                                rel="noopener noreferrer" 
+                                                className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 underline"
+                                            >
+                                                Get a free Gemini API Key <ExternalLink size={11}/>
+                                            </a>
+                                        </div>
+                                        <div className="relative flex items-center">
+                                            <input 
+                                                type={showGeminiKeySecret ? "text" : "password"} 
+                                                placeholder="Paste your AIzaSy... key here" 
+                                                value={geminiApiKey} 
+                                                onChange={e => handleUpdateGeminiKey(e.target.value)} 
+                                                className="w-full bg-black/40 border border-white/10 rounded p-2 text-sm outline-none focus:border-white/30 transition-colors pr-10 font-mono text-gray-200"
+                                            />
+                                            <button 
+                                                type="button" 
+                                                onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
+                                                className="absolute right-2 p-1 text-gray-400 hover:text-gray-200" 
+                                                title={showGeminiKeySecret ? "Hide API Key" : "Show API Key"}
+                                            >
+                                                {showGeminiKeySecret ? <EyeOff size={14}/> : <Eye size={14}/>}
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                                        <button 
+                                            onClick={() => handleTestConnection('gemini')} 
+                                            className="flex-1 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-2"
+                                            disabled={testStatuses.gemini === 'testing'}
+                                        >
+                                            {testStatuses.gemini === 'testing' ? (
+                                                <><Loader2 size={14} className="animate-spin"/> Testing Connection...</>
+                                            ) : testStatuses.gemini === 'ok' ? (
+                                                <><Check size={14} className="text-green-300"/> Key Verified & Working!</>
+                                            ) : testStatuses.gemini === 'error' ? (
+                                                <><X size={14} className="text-red-300"/> Test Failed (Click to Retry)</>
+                                            ) : (
+                                                <><Zap size={14} className="text-yellow-300"/> Test Key Connection</>
+                                            )}
+                                        </button>
+
+                                        {typeof window !== 'undefined' && (window as any).aistudio && (
+                                            <button 
+                                                onClick={async () => {
+                                                    if ((window as any).aistudio) {
+                                                        await (window as any).aistudio.openSelectKey();
+                                                        setApiKeyStatus('detected');
+                                                        setHasPaidKey(true);
+                                                    }
+                                                }}
+                                                className="py-2 px-3 bg-white/10 hover:bg-white/20 border border-white/10 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                                            >
+                                                <Key size={14} /> AI Studio Key Selector
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    <div className="bg-blue-950/20 border border-blue-800/30 rounded p-3 text-xs text-blue-200/80 space-y-1.5">
+                                        <p className="font-semibold text-blue-200">🚀 Using this app on Vercel or standalone hosting:</p>
+                                        <p>• <strong>Direct In-App Use:</strong> Paste your Gemini API key above and click <em>Test Key Connection</em>. The key is securely saved in your browser's local storage and used immediately—no rebuild needed!</p>
+                                        <p>• <strong>Vercel Environment Variable:</strong> You can also set <code>GEMINI_API_KEY</code> or <code>VITE_GEMINI_API_KEY</code> in your Vercel Project Settings &rarr; Environment Variables. Note that because Vite builds static assets, you must click <strong>Redeploy</strong> in Vercel after adding the variable.</p>
+                                    </div>
                                 </div>
-                                <p className="text-xs text-gray-500 mt-2">
-                                    This app securely accesses your Google AI API key. If you are experiencing quota issues or "free tier" limitations despite having a paid account, try re-selecting your key.
-                                </p>
                             </div>
 
                             <div className="bg-[#1a1a1a] p-4 rounded-lg border border-red-900/30">
@@ -7281,7 +7572,7 @@ The old city. The weeping wall. Let's all go and remember.
         onAutoDescribeCharacter={async (name: string) => {
           const prompt = `Create a detailed, specific physical description for a character named "${name}". Focus on concrete visual details like age, facial structure, hair style and color, eye color, build, skin tone, clothing style, and distinguishing visual marks. Output only the description in 1 concise paragraph.`;
           if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
             const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
             return (res.text || '').trim();
           } else {
@@ -7289,7 +7580,7 @@ The old city. The weeping wall. Let's all go and remember.
             return res.trim();
           }
         }}
-        isAiConfigured={Boolean(provider === 'gemini' ? (process.env.GEMINI_API_KEY || process.env.API_KEY) : true)}
+        isAiConfigured={Boolean(provider === 'gemini' ? getEffectiveGeminiKey() : true)}
       />
 
       <BatchCharacterUpdateModal
@@ -7305,7 +7596,7 @@ The old city. The weeping wall. Let's all go and remember.
         onAutoDescribeCharacter={async (name: string, seed?: string) => {
           const prompt = `Create a detailed, cinema-grade physical description for a character named "${name}". ${seed ? `Incorporate or expand on these existing features: "${seed}".` : ''} Focus on concrete visual details including ethnicity/age, facial features, eyes, hair style/color/texture, distinctive wardrobe, clothing fabric textures, accessories/props, and visual atmosphere. Return only the description in 1 concise paragraph suitable for AI image and video generation prompts.`;
           if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: (process.env.GEMINI_API_KEY || process.env.API_KEY)! });
+            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
             const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
             return (res.text || '').trim();
           } else {
@@ -7313,7 +7604,7 @@ The old city. The weeping wall. Let's all go and remember.
             return res.trim();
           }
         }}
-        isAiConfigured={Boolean(provider === 'gemini' ? (process.env.GEMINI_API_KEY || process.env.API_KEY) : true)}
+        isAiConfigured={Boolean(provider === 'gemini' ? getEffectiveGeminiKey() : true)}
       />
 
       <ColorGradeModal
@@ -7331,7 +7622,7 @@ The old city. The weeping wall. Let's all go and remember.
         onRequestAIGeneration={async (prompt: string, isJson: boolean) => {
           return await generateTextWithActiveAI(prompt, isJson);
         }}
-        isAiConfigured={Boolean(provider === 'gemini' ? (process.env.GEMINI_API_KEY || process.env.API_KEY) : true)}
+        isAiConfigured={Boolean(provider === 'gemini' ? getEffectiveGeminiKey() : true)}
       />
 
       <AIStyleRefinerModal
@@ -7342,7 +7633,7 @@ The old city. The weeping wall. Let's all go and remember.
         onRequestAIGeneration={async (prompt: string, isJson: boolean) => {
           return await generateTextWithActiveAI(prompt, isJson);
         }}
-        isAiConfigured={Boolean(provider === 'gemini' ? (process.env.GEMINI_API_KEY || process.env.API_KEY) : true)}
+        isAiConfigured={Boolean(provider === 'gemini' ? getEffectiveGeminiKey() : true)}
       />
 
       <AIContrastBoosterModal
@@ -7356,7 +7647,7 @@ The old city. The weeping wall. Let's all go and remember.
         onRequestAIGeneration={async (prompt: string, isJson: boolean) => {
           return await generateTextWithActiveAI(prompt, isJson);
         }}
-        isAiConfigured={Boolean(provider === 'gemini' ? (process.env.GEMINI_API_KEY || process.env.API_KEY) : true)}
+        isAiConfigured={Boolean(provider === 'gemini' ? getEffectiveGeminiKey() : true)}
         initialFocusSceneIndex={contrastBoosterFocusSceneIndex}
       />
 
