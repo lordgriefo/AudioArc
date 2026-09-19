@@ -10,11 +10,11 @@ import {
   Grid, Clock, Monitor, StopCircle, RefreshCw, Loader2, Monitor as MonitorIcon,
   ShieldCheck, AlertCircle, CopyPlus, FolderOpen,
   Terminal, Pencil, AlertTriangle, ScrollText,
-  Undo, Redo, ArrowUp, ArrowDown, CreditCard, ExternalLink, HelpCircle, Upload, Volume2, Smile, Palette, Layers,
+  Undo, Redo, Undo2, Redo2, CheckCircle2, Info, ArrowUp, ArrowDown, CreditCard, ExternalLink, HelpCircle, Upload, Volume2, Smile, Palette, Layers,
   Maximize2, Link as LinkIcon, Paperclip, Printer, User, Cloud, SkipBack, SkipForward,
   FileJson, FileArchive, VideoIcon, UserPlus, Cpu, BookOpen, Mic, Coffee, Key,
   SlidersHorizontal, BookmarkPlus, ArrowLeftRight, UserCheck, Tag, Compass, Bot, LayoutGrid, Merge, Contrast,
-  Eye, EyeOff
+  Eye, EyeOff, FileSpreadsheet
 } from 'lucide-react';
 import JSZip from 'jszip';
 import * as idb from 'idb-keyval';
@@ -544,7 +544,30 @@ export const App: React.FC = () => {
     cancelText?: string;
     type?: 'danger' | 'info';
   } | null>(null);
-  const [notification, setNotification] = useState<string | null>(null);
+  const [notification, setNotification] = useState<{
+    message: string;
+    type?: 'undo' | 'redo' | 'success' | 'info' | 'warning';
+    detail?: string;
+    timestamp?: number;
+  } | string | null>(null);
+  const toastTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const triggerToast = useCallback((
+    message: string, 
+    options?: { type?: 'undo' | 'redo' | 'success' | 'info' | 'warning'; detail?: string; duration?: number }
+  ) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setNotification({
+      message,
+      type: options?.type || 'info',
+      detail: options?.detail,
+      timestamp: Date.now()
+    });
+    toastTimerRef.current = setTimeout(() => {
+      setNotification(null);
+    }, options?.duration || 3800);
+  }, []);
+
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved'>('idle');
   
   // Data State
@@ -614,6 +637,7 @@ export const App: React.FC = () => {
   const [aiEditorLoading, setAiEditorLoading] = useState(false);
   const [imageIntegrationLevel, setImageIntegrationLevel] = useState<'low' | 'balanced' | 'high'>('balanced');
   const [sceneSplitThreshold, setSceneSplitThreshold] = useState<number>(50);
+  const [showBulkActionMenu, setShowBulkActionMenu] = useState<'camera' | 'transition' | null>(null);
 
   const [influenceSearch, setInfluenceSearch] = useState<string>('');
   const [styleDropdownOpen, setStyleDropdownOpen] = useState(false);
@@ -2356,9 +2380,260 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
     setCurrentTime(newTime);
   };
 
-  const pushToHistory = () => { if (storyboard) setHistoryStack(prev => ({ past: [...prev.past, JSON.parse(JSON.stringify(storyboard))], future: [] })); };
-  const handleUndo = () => { if (historyStack.past.length === 0) return; const previous = historyStack.past[historyStack.past.length - 1]; const newPast = historyStack.past.slice(0, -1); if (storyboard) setHistoryStack(prev => ({ past: newPast, future: [JSON.parse(JSON.stringify(storyboard)), ...prev.future] })); setStoryboard(previous); };
-  const handleRedo = () => { if (historyStack.future.length === 0) return; const next = historyStack.future[0]; const newFuture = historyStack.future.slice(1); if (storyboard) setHistoryStack(prev => ({ past: [...prev.past, JSON.parse(JSON.stringify(storyboard))], future: newFuture })); setStoryboard(next); };
+  const describeStoryboardDiff = (
+    before: ScenePrompt[] | null,
+    after: ScenePrompt[] | null,
+    action: 'undo' | 'redo'
+  ): { message: string; detail?: string } => {
+    if (!before && !after) return { message: action === 'undo' ? 'Undid last change' : 'Redid last change' };
+
+    if (!before && after) {
+      return {
+        message: action === 'undo' ? 'Restored storyboard' : 'Restored storyboard',
+        detail: `${after.length} scene${after.length === 1 ? '' : 's'} available`
+      };
+    }
+
+    if (before && !after) {
+      return {
+        message: action === 'undo' ? 'Reverted to empty storyboard' : 'Cleared storyboard'
+      };
+    }
+
+    const bList = before!;
+    const aList = after!;
+
+    // 1. Scene count changes
+    if (bList.length !== aList.length) {
+      if (aList.length > bList.length) {
+        const diffCount = aList.length - bList.length;
+        if (diffCount === 1) {
+          const restoredIdx = aList.findIndex((scene, i) => !bList[i] || bList[i].id !== scene.id);
+          const sceneNum = (restoredIdx !== -1 ? restoredIdx : aList.length - 1) + 1;
+          const targetScene = aList[sceneNum - 1];
+          const preview = targetScene?.lyric?.trim() || targetScene?.description?.trim() || `Scene ${sceneNum}`;
+          const shortPreview = preview.length > 30 ? preview.substring(0, 30) + '...' : preview;
+
+          if (action === 'undo') {
+            return {
+              message: `Restored deleted Scene ${sceneNum}`,
+              detail: `"${shortPreview}" (${aList.length} scenes total)`
+            };
+          } else {
+            return {
+              message: `Redid scene creation: Scene ${sceneNum}`,
+              detail: `"${shortPreview}" (${aList.length} scenes total)`
+            };
+          }
+        } else {
+          return {
+            message: action === 'undo' ? `Restored ${diffCount} scenes` : `Re-added ${diffCount} scenes`,
+            detail: `Storyboard now has ${aList.length} scenes`
+          };
+        }
+      } else {
+        const diffCount = bList.length - aList.length;
+        if (diffCount === 1) {
+          const removedIdx = bList.findIndex((scene, i) => !aList[i] || aList[i].id !== scene.id);
+          const sceneNum = (removedIdx !== -1 ? removedIdx : bList.length - 1) + 1;
+
+          if (action === 'undo') {
+            return {
+              message: `Reverted added Scene ${sceneNum}`,
+              detail: `Storyboard restored to ${aList.length} scene${aList.length === 1 ? '' : 's'}`
+            };
+          } else {
+            return {
+              message: `Redid deletion of Scene ${sceneNum}`,
+              detail: `Storyboard now has ${aList.length} scene${aList.length === 1 ? '' : 's'}`
+            };
+          }
+        } else {
+          return {
+            message: action === 'undo' ? `Reverted batch scene addition (${diffCount} scenes)` : `Deleted ${diffCount} scenes`,
+            detail: `Storyboard now has ${aList.length} scene${aList.length === 1 ? '' : 's'}`
+          };
+        }
+      }
+    }
+
+    // 2. Scene order changes
+    const orderChanged = bList.some((s, idx) => s.id !== aList[idx]?.id);
+    if (orderChanged) {
+      return {
+        message: action === 'undo' ? 'Reverted scene order' : 'Redid scene order',
+        detail: 'Timeline sequence restored'
+      };
+    }
+
+    // 3. Same scene count & IDs - find modified scene(s)
+    const changedIndices: number[] = [];
+    for (let i = 0; i < bList.length; i++) {
+      if (JSON.stringify(bList[i]) !== JSON.stringify(aList[i])) {
+        changedIndices.push(i);
+      }
+    }
+
+    if (changedIndices.length === 0) {
+      return {
+        message: action === 'undo' ? 'Undid last modification' : 'Redid last modification'
+      };
+    }
+
+    if (changedIndices.length === 1) {
+      const idx = changedIndices[0];
+      const b = bList[idx];
+      const a = aList[idx];
+      const sceneNum = idx + 1;
+
+      if (b.generatedImage !== a.generatedImage) {
+        if (!a.generatedImage && b.generatedImage) {
+          return {
+            message: `Reverted image in Scene ${sceneNum}`,
+            detail: 'Visual frame cleared'
+          };
+        }
+        return {
+          message: action === 'undo' ? `Restored previous image in Scene ${sceneNum}` : `Re-applied image in Scene ${sceneNum}`,
+          detail: 'Visual preview reverted'
+        };
+      }
+
+      if (b.duration !== a.duration || b.startTime !== a.startTime || b.endTime !== a.endTime) {
+        return {
+          message: action === 'undo' ? `Reverted timing on Scene ${sceneNum}` : `Redid timing on Scene ${sceneNum}`,
+          detail: `Duration set to ${a.duration}s (${a.startTime || '0:00'} - ${a.endTime || ''})`
+        };
+      }
+
+      if (b.cameraMovement !== a.cameraMovement) {
+        return {
+          message: action === 'undo' ? `Reverted camera move on Scene ${sceneNum}` : `Redid camera move on Scene ${sceneNum}`,
+          detail: `Camera motion set to "${a.cameraMovement || 'none'}"`
+        };
+      }
+
+      if (b.transitionIn !== a.transitionIn || b.transitionOut !== a.transitionOut) {
+        return {
+          message: action === 'undo' ? `Reverted transitions on Scene ${sceneNum}` : `Redid transitions on Scene ${sceneNum}`,
+          detail: `In: ${a.transitionIn || 'none'}, Out: ${a.transitionOut || 'none'}`
+        };
+      }
+
+      if (b.imagePrompt !== a.imagePrompt) {
+        const snippet = a.imagePrompt?.trim().substring(0, 38) || '';
+        return {
+          message: action === 'undo' ? `Reverted image prompt in Scene ${sceneNum}` : `Redid image prompt in Scene ${sceneNum}`,
+          detail: snippet ? `"${snippet}..."` : undefined
+        };
+      }
+
+      if (JSON.stringify(b.videoPrompts) !== JSON.stringify(a.videoPrompts) || b.soraPrompt !== a.soraPrompt) {
+        return {
+          message: action === 'undo' ? `Reverted video prompt in Scene ${sceneNum}` : `Redid video prompt in Scene ${sceneNum}`,
+          detail: 'Camera and motion prompt restored'
+        };
+      }
+
+      if (b.lyric !== a.lyric) {
+        const snippet = a.lyric?.trim().substring(0, 30) || 'Empty';
+        return {
+          message: action === 'undo' ? `Reverted lyric in Scene ${sceneNum}` : `Redid lyric in Scene ${sceneNum}`,
+          detail: `"${snippet}"`
+        };
+      }
+
+      if (b.description !== a.description) {
+        return {
+          message: action === 'undo' ? `Reverted description in Scene ${sceneNum}` : `Redid description in Scene ${sceneNum}`,
+          detail: a.description ? `"${a.description.substring(0, 32)}..."` : 'Description cleared'
+        };
+      }
+
+      if (b.groupName !== a.groupName) {
+        return {
+          message: action === 'undo' ? `Reverted group name for Scene ${sceneNum}` : `Redid group name for Scene ${sceneNum}`,
+          detail: a.groupName ? `Group: "${a.groupName}"` : 'No group'
+        };
+      }
+
+      return {
+        message: action === 'undo' ? `Reverted edits to Scene ${sceneNum}` : `Redid edits to Scene ${sceneNum}`
+      };
+    }
+
+    // Multiple scenes changed
+    const timingOnly = changedIndices.every(i => {
+      const b = bList[i];
+      const a = aList[i];
+      return b.imagePrompt === a.imagePrompt &&
+        b.lyric === a.lyric &&
+        b.description === a.description &&
+        b.generatedImage === a.generatedImage;
+    });
+
+    if (timingOnly) {
+      return {
+        message: action === 'undo' ? `Reverted timing across ${changedIndices.length} scenes` : `Redid timing across ${changedIndices.length} scenes`,
+        detail: 'Audio sync / beat alignment cuts reverted'
+      };
+    }
+
+    return {
+      message: action === 'undo' ? `Reverted batch edits across ${changedIndices.length} scenes` : `Redid batch edits across ${changedIndices.length} scenes`,
+      detail: `Scenes ${changedIndices.slice(0, 3).map(i => `#${i + 1}`).join(', ')}${changedIndices.length > 3 ? '...' : ''} updated`
+    };
+  };
+
+  const pushToHistory = (_label?: string) => { if (storyboard) setHistoryStack(prev => ({ past: [...prev.past, JSON.parse(JSON.stringify(storyboard))], future: [] })); };
+  
+  const handleUndo = () => { 
+    if (historyStack.past.length === 0) {
+      triggerToast("Nothing left to undo", { type: 'info', detail: 'You are at the earliest point in storyboard history.' });
+      return;
+    }
+    const previous = historyStack.past[historyStack.past.length - 1]; 
+    const newPast = historyStack.past.slice(0, -1); 
+    const diff = describeStoryboardDiff(storyboard, previous, 'undo');
+
+    if (storyboard) {
+      setHistoryStack(prev => ({ past: newPast, future: [JSON.parse(JSON.stringify(storyboard)), ...prev.future] })); 
+    }
+    setStoryboard(previous); 
+
+    const historyLeft = newPast.length > 0 
+      ? `${newPast.length} undo step${newPast.length === 1 ? '' : 's'} available`
+      : 'Reached oldest history point';
+
+    triggerToast(diff.message, {
+      type: 'undo',
+      detail: diff.detail ? `${diff.detail} • ${historyLeft}` : historyLeft
+    });
+  };
+
+  const handleRedo = () => { 
+    if (historyStack.future.length === 0) {
+      triggerToast("Nothing left to redo", { type: 'info', detail: 'You are at the latest point in storyboard history.' });
+      return;
+    }
+    const next = historyStack.future[0]; 
+    const newFuture = historyStack.future.slice(1); 
+    const diff = describeStoryboardDiff(storyboard, next, 'redo');
+
+    if (storyboard) {
+      setHistoryStack(prev => ({ past: [...prev.past, JSON.parse(JSON.stringify(storyboard))], future: newFuture })); 
+    }
+    setStoryboard(next); 
+
+    const redoLeft = newFuture.length > 0
+      ? `${newFuture.length} redo step${newFuture.length === 1 ? '' : 's'} remaining`
+      : 'Reached latest state';
+
+    triggerToast(diff.message, {
+      type: 'redo',
+      detail: diff.detail ? `${diff.detail} • ${redoLeft}` : redoLeft
+    });
+  };
 
   useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
@@ -3495,6 +3770,67 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
     setStoryboard(storyboard.map(s => ({ ...s, isSelected: false })));
   };
 
+  const handleBatchSetCamera = (movementVal: string) => {
+    if (!storyboard) return;
+    const selectedCount = storyboard.filter(s => s.isSelected).length;
+    if (selectedCount === 0) return;
+    pushToHistory(`Updated camera movement to "${movementVal === 'none' ? 'Auto' : movementVal}" across ${selectedCount} scenes`);
+
+    const movementOpt = CINEMATIC_CAMERA_MOVEMENTS.find(m => m.id === movementVal || m.name.toLowerCase() === movementVal.toLowerCase());
+    const movementLabel = movementOpt ? movementOpt.name : movementVal;
+    const movementTag = `[Camera Movement: ${movementLabel}]`;
+
+    const newSb = storyboard.map(s => {
+      if (!s.isSelected) return s;
+      const scene = { ...s, cameraMovement: movementVal };
+      if (movementVal && movementVal !== 'none') {
+        if (scene.soraPrompt) {
+          const cleanSora = scene.soraPrompt.replace(/\[Camera Movement:[^\]]+\]\s*/gi, '').replace(/^Camera movement:\s*[^.]+\.\s*/i, '').trim();
+          scene.soraPrompt = `${movementTag} ${cleanSora}`;
+        }
+      } else {
+        if (scene.soraPrompt) {
+          scene.soraPrompt = scene.soraPrompt.replace(/\[Camera Movement:[^\]]+\]\s*/gi, '').replace(/^Camera movement:\s*[^.]+\.\s*/i, '').trim();
+        }
+      }
+      return scene;
+    });
+
+    setStoryboard(newSb);
+    setShowBulkActionMenu(null);
+    setNotification({
+      type: 'success',
+      message: `Set camera movement to "${movementVal === 'none' ? 'Auto' : movementLabel}" for ${selectedCount} selected scenes.`
+    });
+  };
+
+  const handleBatchSetTransition = (target: 'in' | 'out' | 'both', transitionVal: string) => {
+    if (!storyboard) return;
+    const selectedCount = storyboard.filter(s => s.isSelected).length;
+    if (selectedCount === 0) return;
+    const targetLabel = target === 'in' ? 'Transition In' : target === 'out' ? 'Transition Out' : 'Transitions (In & Out)';
+    pushToHistory(`Set ${targetLabel} to "${transitionVal}" across ${selectedCount} scenes`);
+
+    const newSb = storyboard.map(s => {
+      if (!s.isSelected) return s;
+      const updated = { ...s };
+      if (target === 'in' || target === 'both') {
+        updated.transitionIn = transitionVal;
+      }
+      if (target === 'out' || target === 'both') {
+        updated.transitionOut = transitionVal;
+      }
+      return updated;
+    });
+
+    setStoryboard(newSb);
+    setShowBulkActionMenu(null);
+    setNotification({
+      type: 'success',
+      message: `Set ${targetLabel} to "${transitionVal}" for ${selectedCount} selected scenes.`
+    });
+  };
+
   const deleteSelectedScenes = () => {
     if (!storyboard) return;
     const selectedCount = storyboard.filter(s => s.isSelected).length;
@@ -4189,7 +4525,7 @@ Output ONLY valid JSON with keys:
     await exportStoryboardAsPDF(filename);
   };
 
-  const handleExport = async (type: 'json' | 'txt' | 'image_txt' | 'video_txt' | 'image_csv' | 'zip' | 'sora_txt' | 'comfy_image' | 'comfy_video' | 'screenplay' | 'lrc' | 'wunderbar') => {
+  const handleExport = async (type: 'json' | 'txt' | 'image_txt' | 'video_txt' | 'image_csv' | 'shotlist_csv' | 'zip' | 'sora_txt' | 'comfy_image' | 'comfy_video' | 'screenplay' | 'lrc' | 'wunderbar') => {
       if (!storyboard && !['json', 'lrc', 'wunderbar'].includes(type)) return setErrorMessage("No storyboard to export.");
       if (type === 'lrc' && !storyboard && (!lyrics || !lyrics.trim())) return setErrorMessage("Please enter lyrics or create a storyboard first to export an .lrc lyric sheet.");
       
@@ -4252,6 +4588,48 @@ Output ONLY valid JSON with keys:
               filename = getExportFilename('prompts', 'csv'); 
               mime = "text/csv"; 
               break;
+          case 'shotlist_csv': {
+              const headers = [
+                'Scene Number',
+                'Group / Location',
+                'Start Time',
+                'End Time',
+                'Duration (s)',
+                'Lyric',
+                'Action Summary',
+                'Voiceover Text',
+                'Camera Movement',
+                'Transition In',
+                'Transition Out',
+                'Image Prompt',
+                'Video Prompt (Subtle)',
+                'Video Prompt (Dynamic)',
+                'Video Prompt (Stylistic)',
+                'Sora Video Prompt'
+              ];
+              const rows = storyboard!.map((s, i) => [
+                `${i + 1}`,
+                s.groupName || '',
+                s.startTime || '',
+                s.endTime || '',
+                `${s.duration ?? ''}`,
+                s.lyric || '',
+                s.description || '',
+                s.isVoiceoverEnabled && s.voiceoverText ? s.voiceoverText : '',
+                s.cameraMovement && s.cameraMovement !== 'none' ? s.cameraMovement : 'Auto',
+                s.transitionIn || 'none',
+                s.transitionOut || 'none',
+                s.imagePrompt || '',
+                s.videoPrompts?.[0] || '',
+                s.videoPrompts?.[1] || '',
+                s.videoPrompts?.[2] || '',
+                s.soraPrompt || ''
+              ].map(val => `"${String(val).replace(/"/g, '""')}"`).join(','));
+              content = [headers.map(h => `"${h}"`).join(','), ...rows].join('\n');
+              filename = getExportFilename('shotlist', 'csv');
+              mime = "text/csv";
+              break;
+          }
           case 'sora_txt': 
               content = storyboard!.map((scene, idx) => `SCENE ${idx + 1} (${scene.startTime}-${scene.endTime}) [${scene.groupName || 'Scene'} | ${scene.cameraMovement || 'Auto'}]:\n${getEffectiveVideoPrompt(scene)}`).join('\n\n---\n\n');
               filename = getExportFilename('sora_prompts', 'txt'); 
@@ -4303,6 +4681,27 @@ Output ONLY valid JSON with keys:
         if (storyboard) {
             const shotlistContent = storyboard.map((s, i) => `SCENE ${i+1} (${s.startTime} - ${s.endTime})\nDURATION: ${s.duration}s\nLYRIC: "${s.lyric}"\n\n[IMAGE PROMPT]\n${s.imagePrompt}\n\n[VIDEO PROMPTS]\n1. Subtle: ${s.videoPrompts[0] || 'N/A'}\n2. Dynamic: ${s.videoPrompts[1] || 'N/A'}\n3. Stylistic: ${s.videoPrompts[2] || 'N/A'}\n\n[SORA PROMPT]\n${s.soraPrompt || 'N/A'}\n\n--------------------------------------------------`).join('\n\n');
             zip.file('master_shotlist.txt', shotlistContent);
+
+            const shotlistCsvHeaders = ['Scene Number', 'Group / Location', 'Start Time', 'End Time', 'Duration (s)', 'Lyric', 'Action Summary', 'Voiceover Text', 'Camera Movement', 'Transition In', 'Transition Out', 'Image Prompt', 'Video Prompt (Subtle)', 'Video Prompt (Dynamic)', 'Video Prompt (Stylistic)', 'Sora Video Prompt'];
+            const shotlistCsvRows = storyboard.map((s, i) => [
+              `${i + 1}`,
+              s.groupName || '',
+              s.startTime || '',
+              s.endTime || '',
+              `${s.duration ?? ''}`,
+              s.lyric || '',
+              s.description || '',
+              s.isVoiceoverEnabled && s.voiceoverText ? s.voiceoverText : '',
+              s.cameraMovement && s.cameraMovement !== 'none' ? s.cameraMovement : 'Auto',
+              s.transitionIn || 'none',
+              s.transitionOut || 'none',
+              s.imagePrompt || '',
+              s.videoPrompts?.[0] || '',
+              s.videoPrompts?.[1] || '',
+              s.videoPrompts?.[2] || '',
+              s.soraPrompt || ''
+            ].map(val => `"${String(val).replace(/"/g, '""')}"`).join(','));
+            zip.file('shotlist.csv', [shotlistCsvHeaders.map(h => `"${h}"`).join(','), ...shotlistCsvRows].join('\n'));
 
             const imagePromptsContent = storyboard.map((s, i) => `SCENE ${i+1}:\n${s.imagePrompt}`).join('\n\n');
             zip.file('image_prompts.txt', imagePromptsContent);
@@ -5888,6 +6287,105 @@ The old city. The weeping wall. Let's all go and remember.
                                 <button onClick={() => { setColorGradeFocusSceneIndex(null); setShowColorGradeModal(true); }} className="px-2.5 py-1 bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-bold rounded-lg uppercase transition-colors flex items-center gap-1 shadow-sm whitespace-nowrap" title="Apply color grading filters to selected scenes"><Palette size={11}/> Color Grade</button>
                                 <button onClick={() => setShowStyleRefinerModal(true)} className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold rounded-lg uppercase transition-colors flex items-center gap-1 shadow-sm whitespace-nowrap" title="Apply cohesive cinematic visual filter to selected scenes with AI Style Refiner"><Sparkles size={11}/> Style Refiner</button>
                                 <button onClick={() => { setContrastBoosterFocusSceneIndex(null); setShowContrastBoosterModal(true); }} className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold rounded-lg uppercase transition-colors flex items-center gap-1 shadow-sm whitespace-nowrap" title="Boost dramatic contrast and visual depth for selected scenes with AI Contrast Booster"><Contrast size={11}/> Contrast Booster</button>
+
+                                {/* Bulk Camera Movement Dropdown */}
+                                <div className="relative">
+                                    <button 
+                                        onClick={() => setShowBulkActionMenu(showBulkActionMenu === 'camera' ? null : 'camera')}
+                                        className={`px-2.5 py-1 ${showBulkActionMenu === 'camera' ? 'bg-sky-500 text-white shadow-md ring-2 ring-sky-400/50' : 'bg-sky-600/80 hover:bg-sky-500 text-white'} text-[10px] font-bold rounded-lg uppercase transition-colors flex items-center gap-1 shadow-sm whitespace-nowrap border border-sky-400/30`}
+                                        title="Batch set camera movement for all selected scenes"
+                                    >
+                                        <Video size={11}/> Camera Move <ChevronDown size={11} className={`transition-transform duration-200 ${showBulkActionMenu === 'camera' ? 'rotate-180' : ''}`} />
+                                    </button>
+
+                                    {showBulkActionMenu === 'camera' && (
+                                        <div className="absolute left-0 top-full mt-1.5 w-64 bg-slate-900 border border-sky-500/40 rounded-xl shadow-2xl p-2 z-50 animate-in fade-in-50 zoom-in-95 max-h-80 overflow-y-auto custom-scrollbar">
+                                            <div className="px-2 py-1 mb-1 border-b border-white/10 flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-sky-300">Set Camera ({selectedIndices.length} Scenes)</span>
+                                                <button onClick={() => setShowBulkActionMenu(null)} className="text-gray-400 hover:text-white p-0.5"><X size={12}/></button>
+                                            </div>
+                                            <div className="space-y-0.5 text-left">
+                                                <button 
+                                                    onClick={() => handleBatchSetCamera('none')}
+                                                    className="w-full text-left px-2.5 py-1.5 text-xs text-gray-300 hover:text-white hover:bg-sky-600/30 rounded flex items-center justify-between transition-colors"
+                                                >
+                                                    <span className="font-semibold text-gray-400">Auto / Unspecified</span>
+                                                    <span className="text-[9px] text-gray-500 font-mono">Clear</span>
+                                                </button>
+                                                {CINEMATIC_CAMERA_MOVEMENTS.filter(m => m.id !== 'none').map(movement => (
+                                                    <button
+                                                        key={movement.id}
+                                                        onClick={() => handleBatchSetCamera(movement.name)}
+                                                        className="w-full text-left px-2.5 py-1.5 text-xs text-gray-300 hover:text-white hover:bg-sky-600/30 rounded flex items-center justify-between transition-colors group"
+                                                    >
+                                                        <span className="font-medium group-hover:text-sky-300 truncate">{movement.name}</span>
+                                                        <span className="text-[9px] text-gray-500 font-mono group-hover:text-sky-400 shrink-0 ml-1">{movement.category}</span>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Bulk Transition Dropdown */}
+                                <div className="relative">
+                                    <button 
+                                        onClick={() => setShowBulkActionMenu(showBulkActionMenu === 'transition' ? null : 'transition')}
+                                        className={`px-2.5 py-1 ${showBulkActionMenu === 'transition' ? 'bg-teal-500 text-white shadow-md ring-2 ring-teal-400/50' : 'bg-teal-600/80 hover:bg-teal-500 text-white'} text-[10px] font-bold rounded-lg uppercase transition-colors flex items-center gap-1 shadow-sm whitespace-nowrap border border-teal-400/30`}
+                                        title="Batch set transition effects for all selected scenes"
+                                    >
+                                        <ArrowLeftRight size={11}/> Transitions <ChevronDown size={11} className={`transition-transform duration-200 ${showBulkActionMenu === 'transition' ? 'rotate-180' : ''}`} />
+                                    </button>
+
+                                    {showBulkActionMenu === 'transition' && (
+                                        <div className="absolute left-0 top-full mt-1.5 w-60 bg-slate-900 border border-teal-500/40 rounded-xl shadow-2xl p-2 z-50 animate-in fade-in-50 zoom-in-95">
+                                            <div className="px-2 py-1 mb-1 border-b border-white/10 flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-teal-300">Set Transition ({selectedIndices.length} Scenes)</span>
+                                                <button onClick={() => setShowBulkActionMenu(null)} className="text-gray-400 hover:text-white p-0.5"><X size={12}/></button>
+                                            </div>
+                                            <div className="space-y-1 text-left">
+                                                {[
+                                                    { id: 'none', label: 'None (Cut)' },
+                                                    { id: 'fade', label: 'Fade' },
+                                                    { id: 'dissolve', label: 'Dissolve' },
+                                                    { id: 'slide-left', label: 'Slide Left' },
+                                                    { id: 'slide-right', label: 'Slide Right' },
+                                                    { id: 'zoom-in', label: 'Zoom In' },
+                                                    { id: 'zoom-out', label: 'Zoom Out' },
+                                                ].map(trans => (
+                                                    <div key={trans.id} className="p-1.5 hover:bg-white/5 rounded-lg border border-white/5">
+                                                        <div className="text-[11px] font-semibold text-gray-200 mb-1 flex items-center justify-between">
+                                                            <span>{trans.label}</span>
+                                                        </div>
+                                                        <div className="flex gap-1">
+                                                            <button
+                                                                onClick={() => handleBatchSetTransition('in', trans.id)}
+                                                                className="flex-1 px-1.5 py-0.5 bg-teal-950 hover:bg-teal-600 text-teal-300 hover:text-white text-[9px] font-medium rounded border border-teal-500/30 transition-colors"
+                                                                title={`Set Transition In to ${trans.label} for all selected scenes`}
+                                                            >
+                                                                In
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleBatchSetTransition('out', trans.id)}
+                                                                className="flex-1 px-1.5 py-0.5 bg-teal-950 hover:bg-teal-600 text-teal-300 hover:text-white text-[9px] font-medium rounded border border-teal-500/30 transition-colors"
+                                                                title={`Set Transition Out to ${trans.label} for all selected scenes`}
+                                                            >
+                                                                Out
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleBatchSetTransition('both', trans.id)}
+                                                                className="flex-1 px-1.5 py-0.5 bg-teal-800 hover:bg-teal-500 text-white text-[9px] font-medium rounded border border-teal-400/40 transition-colors"
+                                                                title={`Set Both In & Out to ${trans.label} for all selected scenes`}
+                                                            >
+                                                                Both
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
                                 <button onClick={handleBatchGenerateSelected} className="px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold rounded-lg uppercase transition-colors whitespace-nowrap">Generate Images</button>
                                 <button onClick={handleBatchGenerateVideoSelected} className="px-2.5 py-1 bg-orange-600 hover:bg-orange-500 text-white text-[10px] font-bold rounded-lg uppercase transition-colors whitespace-nowrap">Generate Videos</button>
                                 <button onClick={deleteSelectedScenes} className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold rounded-lg uppercase transition-colors whitespace-nowrap">Delete Selected</button>
@@ -6599,11 +7097,81 @@ The old city. The weeping wall. Let's all go and remember.
         </footer>
       </div>
       
-      {notification && (
-        <div className="fixed bottom-6 right-6 z-[101] bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg animate-in fade-in slide-in-from-bottom-4">
-            {notification}
-        </div>
-      )}
+      {notification && (() => {
+        const isObj = typeof notification === 'object';
+        const type = isObj ? (notification.type || 'info') : 'info';
+        const message = isObj ? notification.message : notification;
+        const detail = isObj ? notification.detail : undefined;
+
+        let borderClass = "border-white/15 shadow-black/40";
+        let bgGradient = "from-zinc-900/95 to-neutral-950/95";
+        let iconBg = "bg-white/10 text-white";
+        let badgeBg = "bg-white/10 text-gray-300 border-white/20";
+        let badgeText = "Notice";
+        let IconComp = Info;
+
+        if (type === 'undo') {
+          borderClass = "border-amber-500/40 shadow-amber-500/10";
+          bgGradient = "from-zinc-900/95 via-amber-950/30 to-neutral-950/95";
+          iconBg = "bg-amber-500/20 text-amber-300 border border-amber-500/30";
+          badgeBg = "bg-amber-500/20 text-amber-300 border border-amber-500/40";
+          badgeText = "UNDO";
+          IconComp = Undo2;
+        } else if (type === 'redo') {
+          borderClass = "border-blue-500/40 shadow-blue-500/10";
+          bgGradient = "from-zinc-900/95 via-blue-950/30 to-neutral-950/95";
+          iconBg = "bg-blue-500/20 text-blue-300 border border-blue-500/30";
+          badgeBg = "bg-blue-500/20 text-blue-300 border border-blue-500/40";
+          badgeText = "REDO";
+          IconComp = Redo2;
+        } else if (type === 'success') {
+          borderClass = "border-emerald-500/40 shadow-emerald-500/10";
+          bgGradient = "from-zinc-900/95 via-emerald-950/30 to-neutral-950/95";
+          iconBg = "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30";
+          badgeBg = "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40";
+          badgeText = "SUCCESS";
+          IconComp = CheckCircle2;
+        } else if (type === 'warning') {
+          borderClass = "border-amber-500/40 shadow-amber-500/10";
+          bgGradient = "from-zinc-900/95 via-amber-950/30 to-neutral-950/95";
+          iconBg = "bg-amber-500/20 text-amber-300 border border-amber-500/30";
+          badgeBg = "bg-amber-500/20 text-amber-300 border border-amber-500/40";
+          badgeText = "WARNING";
+          IconComp = AlertTriangle;
+        }
+
+        return (
+          <div className="fixed bottom-6 right-6 z-[101] max-w-sm sm:max-w-md w-[calc(100vw-3rem)] animate-in fade-in slide-in-from-bottom-4 duration-200 pointer-events-auto">
+            <div className={`relative bg-gradient-to-br ${bgGradient} ${borderClass} border rounded-xl p-3.5 shadow-2xl backdrop-blur-md flex items-start gap-3`}>
+              <div className={`p-2 rounded-lg shrink-0 ${iconBg}`}>
+                <IconComp size={16} />
+              </div>
+              <div className="flex-1 min-w-0 pr-2">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className={`text-[10px] font-mono font-bold tracking-wider uppercase px-1.5 py-0.5 rounded border ${badgeBg}`}>
+                    {badgeText}
+                  </span>
+                </div>
+                <p className="text-xs font-semibold text-white leading-snug break-words">
+                  {message}
+                </p>
+                {detail && (
+                  <p className="text-[11px] text-gray-400 mt-1 leading-normal break-words">
+                    {detail}
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={() => setNotification(null)}
+                className="text-gray-400 hover:text-white p-1 rounded-md transition-colors shrink-0 -mr-1 -mt-1"
+                title="Dismiss"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {showSettings && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex justify-center items-center p-4 lg:p-12 animate-in fade-in" onClick={() => setShowSettings(false)}>
@@ -8023,6 +8591,32 @@ The old city. The weeping wall. Let's all go and remember.
                           </div>
                           <p className="text-xs text-gray-400 leading-relaxed mb-4">Contextual camera angles, lighting cues, and prompt presets ready for instant one-click insertion into any scene's image or video prompt.</p>
                         </div>
+
+                        <div className="p-6 bg-sky-500/5 border border-sky-500/20 rounded-2xl">
+                          <div className="flex items-center gap-3 mb-4">
+                            <Video size={24} className="text-sky-400" />
+                            <h3 className="text-lg font-bold text-white">Bulk Camera & Transition Actions</h3>
+                          </div>
+                          <p className="text-xs text-gray-400 leading-relaxed mb-4">Multi-select scenes using checkboxes or keyboard shortcuts to rapidly set camera movements or transition dynamics in bulk across your timeline.</p>
+                          <ul className="text-xs text-gray-300 space-y-1.5 list-disc pl-4">
+                            <li><strong>Batch Camera Movement:</strong> Apply 18+ cinematic moves (Dolly In/Out, FPV Drone, 360° Arc, Vertigo Dolly Zoom) across all selected scenes with automatic Sora prompt tag synchronization.</li>
+                            <li><strong>Batch Transitions:</strong> Set Transition In, Transition Out, or both simultaneously (Fade, Dissolve, Slide Left/Right, Zoom In/Out) in one click.</li>
+                            <li><strong>Multi-Action Bar:</strong> Combines with AI Summarization, Character Replacement, Presets, Color Grading, Style Refinement, and Contrast Boosters.</li>
+                          </ul>
+                        </div>
+
+                        <div className="p-6 bg-emerald-500/5 border border-emerald-500/20 rounded-2xl">
+                          <div className="flex items-center gap-3 mb-4">
+                            <Undo2 size={24} className="text-emerald-400" />
+                            <h3 className="text-lg font-bold text-white">Non-Destructive Undo & Redo History</h3>
+                          </div>
+                          <p className="text-xs text-gray-400 leading-relaxed mb-4">AudioArc protects your work with full multi-level state history and intuitive context-aware feedback toasts.</p>
+                          <ul className="text-xs text-gray-300 space-y-1.5 list-disc pl-4">
+                            <li><strong>Keyboard Shortcuts:</strong> Press <code className="text-emerald-300 font-mono text-xs bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-500/30">Ctrl+Z / Cmd+Z</code> to undo, and <code className="text-emerald-300 font-mono text-xs bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-500/30">Ctrl+Y / Cmd+Shift+Z</code> to redo.</li>
+                            <li><strong>Contextual Feedback:</strong> Instant on-screen toast notifications detail exactly what action was reverted or restored (e.g., restored scenes, timeline recalculations, style filters).</li>
+                            <li><strong>Safety Net:</strong> Every major action—card deletions, bulk updates, timeline retimings, and AI modifications—is automatically captured.</li>
+                          </ul>
+                        </div>
                       </div>
                    </div>
                 )}
@@ -8030,6 +8624,11 @@ The old city. The weeping wall. Let's all go and remember.
                 {manualSection === 'export' && (
                    <div className="space-y-8 animate-in slide-in-from-bottom-4 duration-500">
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div className="p-6 bg-white/5 border border-white/10 rounded-xl">
+                          <h3 className="text-white font-bold mb-3 flex items-center gap-2"><FileSpreadsheet size={18} className="text-emerald-400"/> Shotlist CSV (Spreadsheet Ready)</h3>
+                          <p className="text-xs text-gray-400 leading-relaxed mb-3">Export all scene parameters, timings, camera movements, transitions, and every prompt variant (Image, Subtle, Dynamic, Stylistic, Sora, Voiceover) formatted as standard CSV for Google Sheets, Excel, or production trackers.</p>
+                          <div className="text-[10px] text-emerald-400/80 bg-emerald-500/10 border border-emerald-500/20 p-2 rounded">Standalone CSV & Included in Project ZIP bundle</div>
+                        </div>
                         <div className="p-6 bg-white/5 border border-white/10 rounded-xl">
                           <h3 className="text-white font-bold mb-3 flex items-center gap-2"><Music size={18} className="text-pink-400"/> Synchronized .LRC Lyric Sheet</h3>
                           <p className="text-xs text-gray-400 leading-relaxed mb-3">Generates standard timestamped <code className="text-pink-300 font-mono text-xs">.lrc</code> files synced to scene intervals. Ideal for lyric video visualizers, karaoke software, and media players.</p>
@@ -8191,6 +8790,7 @@ The old city. The weeping wall. Let's all go and remember.
 
                   <div className="p-6 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3.5 max-h-[50vh] overflow-y-auto custom-scrollbar">
                       <button onClick={()=>handleExportProjectZip()} className="export-btn"><FileArchive size={24} className="text-yellow-400"/> Project ZIP</button>
+                      <button onClick={()=>handleExport('shotlist_csv')} className="export-btn" title="Export complete spreadsheet-ready Shotlist CSV with all prompt fields, camera moves & transitions"><FileSpreadsheet size={24} className="text-emerald-400"/> Shotlist CSV</button>
                       <button onClick={()=>handleExport('lrc')} className="export-btn" title="Export synchronized .lrc lyric sheet for visualizers"><Music size={24} className="text-pink-400"/> Lyrics (.lrc)</button>
                       <button onClick={()=>handleExport('json')} className="export-btn"><FileJson size={24} className="text-blue-400"/> Project JSON</button>
                       <button onClick={()=>handleExport('txt')} className="export-btn"><FileText size={24} className="text-gray-300"/> Master Shotlist</button>
