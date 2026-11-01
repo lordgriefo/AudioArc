@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { 
   Sparkles, Bot, Monitor, Cpu, Cloud, Zap, 
   ChevronDown, Settings, RefreshCw, 
-  Image as ImageIcon, Activity, Key
+  Image as ImageIcon, Activity
 } from 'lucide-react';
 import { AI_MODEL_LABELS } from './influences';
 
@@ -83,8 +83,8 @@ export const HeaderConnectionStatus: React.FC<HeaderConnectionStatusProps> = ({
           bgColor: 'bg-blue-950/40',
           activeModel: geminiMainModel,
           activeModelDisplay: AI_MODEL_LABELS[geminiMainModel] || geminiMainModel,
-          endpoint: 'Google AI Studio Cloud',
-          type: 'Cloud API'
+          endpoint: 'Server-Side Gemini API (/api/gemini)',
+          type: 'Full-Stack Server API'
         };
       case 'openai':
         return {
@@ -219,18 +219,12 @@ export const HeaderConnectionStatus: React.FC<HeaderConnectionStatusProps> = ({
           <span>{config.name}</span>
         </div>
 
-        {/* Missing Key Warning or Active Model Name */}
-        {!isConnected && provider === 'gemini' ? (
-          <span className="flex items-center gap-1 text-[10px] font-bold text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded border border-amber-500/40 animate-pulse">
-            <Key size={10} /> Enter API Key
+        {/* Active Model Name */}
+        <div className="hidden lg:flex items-center">
+          <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-black/40 text-gray-300 border border-white/5 max-w-[130px] truncate">
+            {config.activeModelDisplay}
           </span>
-        ) : (
-          <div className="hidden lg:flex items-center">
-            <span className="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-black/40 text-gray-300 border border-white/5 max-w-[130px] truncate">
-              {config.activeModelDisplay}
-            </span>
-          </div>
-        )}
+        </div>
 
         {/* Image Engine Pill */}
         <div className="hidden xl:flex items-center">
@@ -283,25 +277,16 @@ export const HeaderConnectionStatus: React.FC<HeaderConnectionStatusProps> = ({
             </div>
           </div>
 
-          {/* Missing Key Banner */}
-          {!isConnected && provider === 'gemini' && (
-            <div className="bg-amber-950/40 border border-amber-500/30 rounded-xl p-3 text-xs space-y-2">
-              <div className="flex items-center gap-2 text-amber-300 font-bold">
-                <Key size={14} />
-                <span>Google API Key Required</span>
+          {/* Server Connection Banner for Gemini */}
+          {provider === 'gemini' && (
+            <div className="bg-blue-950/40 border border-blue-500/30 rounded-xl p-3 text-xs space-y-1">
+              <div className="flex items-center gap-2 text-blue-300 font-bold">
+                <Sparkles size={14} />
+                <span>Full-Stack Server Gemini API</span>
               </div>
               <p className="text-[11px] text-gray-300">
-                A Google Gemini API key is needed to run AudioArc on Vercel or standalone hosting.
+                All model requests are managed securely through server endpoints (/api/gemini/*).
               </p>
-              <button
-                onClick={() => {
-                  setIsOpen(false);
-                  onOpenSettings('billing');
-                }}
-                className="w-full py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-bold text-xs rounded-lg transition-colors flex items-center justify-center gap-1.5 shadow-sm"
-              >
-                <Key size={12} /> Enter Gemini API Key
-              </button>
             </div>
           )}
 

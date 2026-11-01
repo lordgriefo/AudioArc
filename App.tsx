@@ -1,7 +1,15 @@
 
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { GoogleGenAI, Type } from "@google/genai";
+import { 
+  Type, 
+  generateContentServer, 
+  generateContentStreamServer, 
+  generateImageServer, 
+  generateVideoServer, 
+  pingGeminiServer, 
+  checkGeminiStatus 
+} from './geminiService';
 import { 
   Clapperboard, Music, Video, Sparkles, Save, History, Settings, 
   Trash2, X, ChevronDown, ChevronRight, ChevronLeft, Copy, Play, Pause, Download, 
@@ -57,16 +65,6 @@ import { AIContrastBoosterModal } from './AIContrastBoosterModal';
 import { WaveformBoundaryEditor } from './WaveformBoundaryEditor';
 import { PWAInstallButton } from './PWAInstallButton';
 import { BeatSceneSegmentationModal } from './BeatSceneSegmentationModal';
-
-// --- Error Boundary ---
-declare global {
-  interface Window {
-    aistudio: {
-      hasSelectedApiKey: () => Promise<boolean>;
-      openSelectKey: () => Promise<void>;
-    };
-  }
-}
 interface ErrorBoundaryProps {
   children: React.ReactNode;
 }
@@ -134,6 +132,7 @@ export interface ScenePrompt {
   linkedRefIds?: string[];
   transitionIn?: string;
   transitionOut?: string;
+  transitionDuration?: number;
   cameraMovement?: string;
   isLipSyncEnabled?: boolean;
   lipSyncPrompt?: string;
@@ -150,6 +149,15 @@ interface HistoryItem {
   influences: string;
   storyboard: ScenePrompt[];
 }
+
+export interface HistoryStackSnapshot {
+  storyboard: ScenePrompt[];
+  label?: string;
+  actionType?: string;
+  timestamp?: number;
+}
+
+export type HistoryEntry = ScenePrompt[] | HistoryStackSnapshot;
 
 interface CustomInfluence {
   id: string;
@@ -510,7 +518,6 @@ export const App: React.FC = () => {
   const [selectedStyleId, setSelectedStyleId] = useState<string>(VISUAL_STYLES[0].id);
   const [uiThemeColor, setUiThemeColor] = useState<string>(VISUAL_STYLES[0].color);
   const [visualRefs, setVisualRefs] = useState<VisualReference[]>([]);
-  const [hasPaidKey, setHasPaidKey] = useState(false);
 
   // Audio State
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -533,7 +540,7 @@ export const App: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(false);
   const [progress, setProgress] = useState<string>(''); 
   const [storyboard, setStoryboard] = useState<ScenePrompt[] | null>(null);
-  const [historyStack, setHistoryStack] = useState<{past: ScenePrompt[][], future: ScenePrompt[][]}>({ past: [], future: [] });
+  const [historyStack, setHistoryStack] = useState<{past: HistoryEntry[], future: HistoryEntry[]}>({ past: [], future: [] });
   const snapshotRef = useRef<ScenePrompt[] | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | {title: string; body: string; action?: () => void} | null>(null);
   const [confirmModal, setConfirmModal] = useState<{
@@ -690,21 +697,8 @@ export const App: React.FC = () => {
   });
 
   const getEffectiveGeminiKey = useCallback((): string => {
-    if (geminiApiKey && geminiApiKey.trim()) return geminiApiKey.trim();
-    try {
-      if (typeof process !== 'undefined' && process.env) {
-        if (process.env.GEMINI_API_KEY) return process.env.GEMINI_API_KEY;
-        if (process.env.API_KEY) return process.env.API_KEY;
-      }
-    } catch {}
-    try {
-      if (typeof import.meta !== 'undefined' && (import.meta as any).env) {
-        if ((import.meta as any).env.VITE_GEMINI_API_KEY) return (import.meta as any).env.VITE_GEMINI_API_KEY;
-        if ((import.meta as any).env.GEMINI_API_KEY) return (import.meta as any).env.GEMINI_API_KEY;
-      }
-    } catch {}
-    return '';
-  }, [geminiApiKey]);
+    return 'server-managed';
+  }, []);
 
   const [showGeminiKeySecret, setShowGeminiKeySecret] = useState<boolean>(false);
 
@@ -801,8 +795,13 @@ export const App: React.FC = () => {
   // --- Effects ---
   useEffect(() => {
     const checkKey = async () => {
-      if (window.aistudio && await window.aistudio.hasSelectedApiKey()) {
-        setHasPaidKey(true);
+      try {
+        const status = await checkGeminiStatus();
+        if (status.ok) {
+          setApiKeyStatus('detected');
+        }
+      } catch {
+        setApiKeyStatus('detected');
       }
     };
     checkKey();
@@ -1659,8 +1658,7 @@ Output ONLY a valid JSON array of objects with keys: "lyric", "beat" (a one-sent
   
       let beatSheetJsonText = '';
       if (provider === 'gemini') {
-        const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-        const beatSheetResult = await ai.models.generateContent({
+        const beatSheetResult = await generateContentServer({
           model: geminiUtilityModel,
           contents: beatSheetPrompt,
           config: {
@@ -1733,8 +1731,7 @@ IMPORTANT: Respond with ONLY a valid, complete JSON array of scene objects. Do n
         let batchJsonText = '';
         try {
             if (provider === 'gemini') {
-                const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-                const batchResult = await ai.models.generateContent({
+                const batchResult = await generateContentServer({
                     model: geminiMainModel,
                     contents: batchPrompt,
                     config: {
@@ -1838,7 +1835,6 @@ IMPORTANT: Respond with ONLY a valid, complete JSON array of scene objects. Do n
         const influenceList = getInfluenceDescriptions(selectedInfluences, customInfluences);
         const referenceContext = visualRefs.length > 0 ? `CASTING DIRECTIVE:\nMain Characters:\n${visualRefs.map((r, i) => `CHARACTER ${i+1}: "${r.name}" - Appearance: ${r.description}`).join('\n')}\n` : "";
 
-        const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
         const exactDuration = Math.floor(audioDuration);
         
         // --- STEP 1: Audio Breakdown ---
@@ -1862,7 +1858,7 @@ TASKS:
 
 OUTPUT: Return ONLY a valid JSON Array of objects with keys: "lyric", "duration", and "groupName".`;
 
-        const breakdownResult = await ai.models.generateContent({
+        const breakdownResult = await generateContentServer({
             model: geminiUtilityModel,
             contents: breakdownPrompt,
             config: {
@@ -1945,7 +1941,7 @@ OUTPUT: Return ONLY a valid JSON Array of objects for THIS BATCH.
 Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "groupName".`;
             
             try {
-                const batchResult = await ai.models.generateContent({
+                const batchResult = await generateContentServer({
                     model: geminiMainModel,
                     contents: batchDetailingPrompt,
                     config: {
@@ -2198,7 +2194,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
     }
 
     // Save previous state to history stack for Undo support
-    pushToHistory();
+    pushToHistory("Snap Scenes to Audio Beats", "audio-sync");
 
     const mode = options?.mode || snapPacingMode;
     const minDur = options?.minSceneDuration ?? snapMinSceneDuration;
@@ -2241,7 +2237,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
       setTimeout(() => setNotification(null), 3000);
       return;
     }
-    pushToHistory();
+    pushToHistory("Reset Scene Boundaries", "audio-sync");
     let reverted: ScenePrompt[];
     if (storyboard && storyboard.length === lastDetectedStoryboardState.length) {
       reverted = storyboard.map((scene, idx) => ({
@@ -2259,7 +2255,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
   };
 
   const handleUpdateSceneBoundaries = (newScenes: ScenePrompt[], affectedIndexes: number[]) => {
-    pushToHistory();
+    pushToHistory("Adjust Scene Boundary Cut", "timing");
     const synchronized = recalcTimeline(newScenes);
     setStoryboard(synchronized);
     setHasManualBoundaryModifications(true);
@@ -2274,7 +2270,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
   };
 
   const handleApplyBeatSegmentation = (result: BeatSegmentationResult) => {
-    pushToHistory();
+    pushToHistory(`Segmented into ${result.stats.newSceneCount} clips`, "beat-segmentation");
     const synchronized = recalcTimeline(result.updatedStoryboard);
     setStoryboard(synchronized);
     setHasManualBoundaryModifications(true);
@@ -2333,9 +2329,8 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
           const base64Data = base64.split(',')[1];
           
           if (provider === 'gemini') {
-              const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
               const analysisPromise = (async () => {
-                  const res = await ai.models.generateContent({ 
+                  const res = await generateContentServer({ 
                       model: geminiUtilityModel, 
                       contents: { parts: [ { inlineData: { mimeType: file.type || 'image/jpeg', data: base64Data } }, { text: prompt } ] } 
                   });
@@ -2433,10 +2428,28 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
     setCurrentTime(seconds);
   };
 
+  const extractStoryboardFromHistoryEntry = (entry: HistoryEntry | undefined): ScenePrompt[] | null => {
+    if (!entry) return null;
+    if (Array.isArray(entry)) return entry;
+    return entry.storyboard;
+  };
+
+  const extractLabelFromHistoryEntry = (entry: HistoryEntry | undefined): string | undefined => {
+    if (!entry || Array.isArray(entry)) return undefined;
+    return entry.label;
+  };
+
+  const extractActionTypeFromHistoryEntry = (entry: HistoryEntry | undefined): string | undefined => {
+    if (!entry || Array.isArray(entry)) return undefined;
+    return entry.actionType;
+  };
+
   const describeStoryboardDiff = (
     before: ScenePrompt[] | null,
     after: ScenePrompt[] | null,
-    action: 'undo' | 'redo'
+    action: 'undo' | 'redo',
+    storedLabel?: string,
+    actionType?: string
   ): { message: string; detail?: string } => {
     if (!before && !after) return { message: action === 'undo' ? 'Undid last change' : 'Redid last change' };
 
@@ -2480,8 +2493,10 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
           }
         } else {
           return {
-            message: action === 'undo' ? `Restored ${diffCount} scenes` : `Re-added ${diffCount} scenes`,
-            detail: `Storyboard now has ${aList.length} scenes`
+            message: action === 'undo' 
+              ? (storedLabel?.includes('Delete') || actionType === 'batch-delete' ? `Restored ${diffCount} scenes from batch deletion` : `Restored ${diffCount} scenes`)
+              : `Re-added ${diffCount} scenes`,
+            detail: `Storyboard restored to ${aList.length} scenes`
           };
         }
       } else {
@@ -2503,7 +2518,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
           }
         } else {
           return {
-            message: action === 'undo' ? `Reverted batch scene addition (${diffCount} scenes)` : `Deleted ${diffCount} scenes`,
+            message: action === 'undo' ? `Reverted batch scene addition (${diffCount} scenes)` : `Deleted ${diffCount} scenes in bulk`,
             detail: `Storyboard now has ${aList.length} scene${aList.length === 1 ? '' : 's'}`
           };
         }
@@ -2616,13 +2631,104 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
     }
 
     // Multiple scenes changed
+    const scenesListStr = `Scenes ${changedIndices.slice(0, 4).map(i => `#${i + 1}`).join(', ')}${changedIndices.length > 4 ? '...' : ''}`;
+
+    // A. Batch Camera Movement check
+    const isBatchCamera = actionType === 'batch-camera' || changedIndices.every(i => {
+      const b = bList[i];
+      const a = aList[i];
+      const camChanged = b.cameraMovement !== a.cameraMovement;
+      const timingSame = b.duration === a.duration && b.startTime === a.startTime && b.endTime === a.endTime;
+      const visualSame = b.imagePrompt === a.imagePrompt && b.generatedImage === a.generatedImage;
+      const contentSame = b.lyric === a.lyric && b.description === a.description && b.groupName === a.groupName;
+      const transSame = b.transitionIn === a.transitionIn && b.transitionOut === a.transitionOut;
+      return camChanged && timingSame && visualSame && contentSame && transSame;
+    });
+
+    if (isBatchCamera) {
+      if (action === 'undo') {
+        const prevCameras = changedIndices.map(i => aList[i].cameraMovement || 'none');
+        const allSamePrev = prevCameras.every(c => c === prevCameras[0]);
+        if (allSamePrev) {
+          const rawVal = prevCameras[0];
+          const opt = CINEMATIC_CAMERA_MOVEMENTS.find(m => m.id === rawVal || m.name.toLowerCase() === rawVal.toLowerCase());
+          const camName = opt ? opt.name : (rawVal === 'none' ? 'Auto / None' : rawVal);
+          return {
+            message: `Reverted batch camera to "${camName}" across ${changedIndices.length} scenes`,
+            detail: `Restored previous camera setup on ${scenesListStr}`
+          };
+        }
+        return {
+          message: `Reverted batch camera movements across ${changedIndices.length} scenes`,
+          detail: `Original distinct camera movements restored on ${scenesListStr}`
+        };
+      } else {
+        const nextCameras = changedIndices.map(i => aList[i].cameraMovement || 'none');
+        const allSameNext = nextCameras.every(c => c === nextCameras[0]);
+        const opt = CINEMATIC_CAMERA_MOVEMENTS.find(m => m.id === nextCameras[0] || m.name.toLowerCase() === nextCameras[0].toLowerCase());
+        const camName = opt ? opt.name : (nextCameras[0] === 'none' ? 'Auto' : nextCameras[0]);
+        return {
+          message: allSameNext
+            ? `Reapplied batch camera "${camName}" across ${changedIndices.length} scenes`
+            : `Reapplied batch camera movements across ${changedIndices.length} scenes`,
+          detail: `Camera motion applied to ${scenesListStr}`
+        };
+      }
+    }
+
+    // B. Batch Transition check
+    const isBatchTransition = actionType === 'batch-transition' || changedIndices.every(i => {
+      const b = bList[i];
+      const a = aList[i];
+      const transChanged = b.transitionIn !== a.transitionIn || b.transitionOut !== a.transitionOut;
+      const timingSame = b.duration === a.duration && b.startTime === a.startTime && b.endTime === a.endTime;
+      const visualSame = b.imagePrompt === a.imagePrompt && b.generatedImage === a.generatedImage;
+      const contentSame = b.lyric === a.lyric && b.description === a.description && b.groupName === a.groupName;
+      const cameraSame = b.cameraMovement === a.cameraMovement;
+      return transChanged && timingSame && visualSame && contentSame && cameraSame;
+    });
+
+    if (isBatchTransition) {
+      if (action === 'undo') {
+        const prevIn = aList[changedIndices[0]].transitionIn || 'none';
+        const prevOut = aList[changedIndices[0]].transitionOut || 'none';
+        const allSameIn = changedIndices.every(i => (aList[i].transitionIn || 'none') === prevIn);
+        const allSameOut = changedIndices.every(i => (aList[i].transitionOut || 'none') === prevOut);
+
+        if (allSameIn && allSameOut) {
+          return {
+            message: `Reverted batch transitions (In: ${prevIn}, Out: ${prevOut}) across ${changedIndices.length} scenes`,
+            detail: `Restored original transitions on ${scenesListStr}`
+          };
+        }
+        return {
+          message: `Reverted batch transitions across ${changedIndices.length} scenes`,
+          detail: `Restored original transition cuts on ${scenesListStr}`
+        };
+      } else {
+        const nextIn = aList[changedIndices[0]].transitionIn;
+        const nextOut = aList[changedIndices[0]].transitionOut;
+        const transSummary = nextIn && nextOut && nextIn === nextOut
+          ? `"${nextIn}"`
+          : (nextIn ? `In: "${nextIn}"` : '') + (nextOut ? ` Out: "${nextOut}"` : '');
+        return {
+          message: `Reapplied batch transitions (${transSummary.trim() || 'Custom'}) across ${changedIndices.length} scenes`,
+          detail: `Applied to ${scenesListStr}`
+        };
+      }
+    }
+
+    // C. Timing only check
     const timingOnly = changedIndices.every(i => {
       const b = bList[i];
       const a = aList[i];
       return b.imagePrompt === a.imagePrompt &&
         b.lyric === a.lyric &&
         b.description === a.description &&
-        b.generatedImage === a.generatedImage;
+        b.generatedImage === a.generatedImage &&
+        b.cameraMovement === a.cameraMovement &&
+        b.transitionIn === a.transitionIn &&
+        b.transitionOut === a.transitionOut;
     });
 
     if (timingOnly) {
@@ -2632,27 +2738,77 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
       };
     }
 
+    // D. Stored label match
+    if (storedLabel) {
+      const cleanLabel = storedLabel.replace(/^(Updated|Set|Applied|Deleted|Batch Set)\s*/i, '');
+      return {
+        message: action === 'undo' ? `Reverted batch: ${cleanLabel}` : `Redid batch: ${cleanLabel}`,
+        detail: `Affected ${changedIndices.length} scenes (${scenesListStr})`
+      };
+    }
+
     return {
       message: action === 'undo' ? `Reverted batch edits across ${changedIndices.length} scenes` : `Redid batch edits across ${changedIndices.length} scenes`,
       detail: `Scenes ${changedIndices.slice(0, 3).map(i => `#${i + 1}`).join(', ')}${changedIndices.length > 3 ? '...' : ''} updated`
     };
   };
 
-  const pushToHistory = (_label?: string) => { if (storyboard) setHistoryStack(prev => ({ past: [...prev.past, JSON.parse(JSON.stringify(storyboard))], future: [] })); };
+  const MAX_HISTORY_STEPS = 50;
+
+  const pushToHistory = (label?: string, actionType?: string) => { 
+    if (!storyboard) return; 
+    // Capture deep cloned pristine snapshot of the entire storyboard before any mutations
+    const snapshot: ScenePrompt[] = JSON.parse(JSON.stringify(storyboard));
+    const entry: HistoryStackSnapshot = {
+      storyboard: snapshot,
+      label,
+      actionType,
+      timestamp: Date.now()
+    };
+    setHistoryStack(prev => {
+      const newPast = [...prev.past, entry];
+      const trimmedPast = newPast.length > MAX_HISTORY_STEPS ? newPast.slice(newPast.length - MAX_HISTORY_STEPS) : newPast;
+      return {
+        past: trimmedPast,
+        future: []
+      };
+    });
+  };
   
   const handleUndo = () => { 
     if (historyStack.past.length === 0) {
       triggerToast("Nothing left to undo", { type: 'info', detail: 'You are at the earliest point in storyboard history.' });
       return;
     }
-    const previous = historyStack.past[historyStack.past.length - 1]; 
+    const previousEntry = historyStack.past[historyStack.past.length - 1]; 
+    const previous = extractStoryboardFromHistoryEntry(previousEntry);
+    if (!previous) return;
+
+    const previousLabel = extractLabelFromHistoryEntry(previousEntry);
+    const previousActionType = extractActionTypeFromHistoryEntry(previousEntry);
     const newPast = historyStack.past.slice(0, -1); 
-    const diff = describeStoryboardDiff(storyboard, previous, 'undo');
+    const diff = describeStoryboardDiff(storyboard, previous, 'undo', previousLabel, previousActionType);
 
     if (storyboard) {
-      setHistoryStack(prev => ({ past: newPast, future: [JSON.parse(JSON.stringify(storyboard)), ...prev.future] })); 
+      const currentSnapshot: HistoryStackSnapshot = {
+        storyboard: JSON.parse(JSON.stringify(storyboard)),
+        label: previousLabel,
+        actionType: previousActionType,
+        timestamp: Date.now()
+      };
+      setHistoryStack(prev => ({ past: newPast, future: [currentSnapshot, ...prev.future] })); 
     }
     setStoryboard(previous); 
+
+    // Immediately persist to storage
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('audioarc_storyboard', JSON.stringify(previous));
+        idb.set('audioarc_storyboard', previous);
+      } catch (err) {
+        console.warn('Persistence on undo failed:', err);
+      }
+    }
 
     const historyLeft = newPast.length > 0 
       ? `${newPast.length} undo step${newPast.length === 1 ? '' : 's'} available`
@@ -2669,14 +2825,35 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
       triggerToast("Nothing left to redo", { type: 'info', detail: 'You are at the latest point in storyboard history.' });
       return;
     }
-    const next = historyStack.future[0]; 
+    const nextEntry = historyStack.future[0]; 
+    const next = extractStoryboardFromHistoryEntry(nextEntry);
+    if (!next) return;
+
+    const nextLabel = extractLabelFromHistoryEntry(nextEntry);
+    const nextActionType = extractActionTypeFromHistoryEntry(nextEntry);
     const newFuture = historyStack.future.slice(1); 
-    const diff = describeStoryboardDiff(storyboard, next, 'redo');
+    const diff = describeStoryboardDiff(storyboard, next, 'redo', nextLabel, nextActionType);
 
     if (storyboard) {
-      setHistoryStack(prev => ({ past: [...prev.past, JSON.parse(JSON.stringify(storyboard))], future: newFuture })); 
+      const currentSnapshot: HistoryStackSnapshot = {
+        storyboard: JSON.parse(JSON.stringify(storyboard)),
+        label: nextLabel,
+        actionType: nextActionType,
+        timestamp: Date.now()
+      };
+      setHistoryStack(prev => ({ past: [...prev.past, currentSnapshot], future: newFuture })); 
     }
     setStoryboard(next); 
+
+    // Immediately persist to storage
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('audioarc_storyboard', JSON.stringify(next));
+        idb.set('audioarc_storyboard', next);
+      } catch (err) {
+        console.warn('Persistence on redo failed:', err);
+      }
+    }
 
     const redoLeft = newFuture.length > 0
       ? `${newFuture.length} redo step${newFuture.length === 1 ? '' : 's'} remaining`
@@ -2766,7 +2943,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
   }, [storyboard, historyStack, isPlaying, audioUrl, isSlideshowMode, showSlideshow, currentPlaybackIndex, slideshowIndex]);
 
   const handleInputFocus = () => { if (storyboard) snapshotRef.current = JSON.parse(JSON.stringify(storyboard)); };
-  const handleInputBlur = () => { if (snapshotRef.current && storyboard && JSON.stringify(snapshotRef.current) !== JSON.stringify(storyboard)) { setHistoryStack(prev => ({ past: [...prev.past, snapshotRef.current!], future: [] })); } snapshotRef.current = null; };
+  const handleInputBlur = () => { if (snapshotRef.current && storyboard && JSON.stringify(snapshotRef.current) !== JSON.stringify(storyboard)) { setHistoryStack(prev => ({ past: [...prev.past, { storyboard: snapshotRef.current!, label: 'Text edit', timestamp: Date.now() }], future: [] })); } snapshotRef.current = null; };
 
   const resetSessionTokens = () => {
     setTotalTokenUsage(0);
@@ -2867,10 +3044,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
 
   const generateTextWithActiveAI = async (prompt: string, isJson = false): Promise<string> => {
     if (provider === 'gemini') {
-      const apiKey = getEffectiveGeminiKey();
-      if (!apiKey) throw new Error("Gemini API key is not configured. Please set your key in Settings.");
-      const ai = new GoogleGenAI({ apiKey });
-      const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
+      const res = await generateContentServer({ model: geminiUtilityModel, contents: prompt });
       updateUsage(res);
       return res.text || '';
     } else {
@@ -2879,7 +3053,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
   };
 
   const handleApplyColorGradeUpdate = async (updatedStoryboard: ScenePrompt[], actionDescription: string) => {
-    pushToHistory();
+    pushToHistory(actionDescription || "Batch Color Grade", "batch-color-grade");
     setStoryboard(updatedStoryboard);
     if (typeof window !== 'undefined') {
       localStorage.setItem('audioarc_storyboard', JSON.stringify(updatedStoryboard));
@@ -2890,7 +3064,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
   };
 
   const handleApplyStyleRefinerUpdate = async (updatedStoryboard: ScenePrompt[], actionDescription: string) => {
-    pushToHistory();
+    pushToHistory(actionDescription || "Batch Style Refinement", "batch-style");
     setStoryboard(updatedStoryboard);
     if (typeof window !== 'undefined') {
       localStorage.setItem('audioarc_storyboard', JSON.stringify(updatedStoryboard));
@@ -2901,7 +3075,7 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
   };
 
   const handleApplyContrastBoosterUpdate = async (updatedStoryboard: ScenePrompt[], actionDescription: string) => {
-    pushToHistory();
+    pushToHistory(actionDescription || "Batch Contrast Boost", "batch-contrast");
     setStoryboard(updatedStoryboard);
     if (typeof window !== 'undefined') {
       localStorage.setItem('audioarc_storyboard', JSON.stringify(updatedStoryboard));
@@ -3004,10 +3178,7 @@ One-sentence scene summary:`;
     setConnectionError(null);
     try {
         if (provider === 'gemini') {
-            const activeKey = getEffectiveGeminiKey();
-            if (!activeKey) throw new Error("Gemini API Key not found. Please enter your API key in Settings -> Gemini or Settings -> Connection.");
-            const ai = new GoogleGenAI({ apiKey: activeKey });
-            await ai.models.generateContent({ model: geminiUtilityModel, contents: 'ping' });
+            await pingGeminiServer(geminiUtilityModel);
         } else if (provider === 'ollama') {
             const res = await fetch(`${ollamaUrl.replace(/\/$/, '')}/api/tags`);
             if (!res.ok) throw new Error(`Could not connect to Ollama at ${ollamaUrl}. Ensure it's running and CORS is configured (see Connection Guides).`);
@@ -3064,14 +3235,7 @@ One-sentence scene summary:`;
     setConnectionError(null);
     try {
       if (providerToTest === 'gemini') {
-        const activeKey = getEffectiveGeminiKey();
-        if (!activeKey) throw new Error("Gemini API Key not found. Please enter or paste your API key in the field above.");
-        const ai = new GoogleGenAI({ apiKey: activeKey });
-        await ai.models.generateContent({ 
-          model: geminiUtilityModel || geminiMainModel || 'gemini-3.8-flash', 
-          contents: 'ping',
-          config: { maxOutputTokens: 2 }
-        });
+        await pingGeminiServer(geminiUtilityModel || geminiMainModel || 'gemini-3.8-flash');
         setApiKeyStatus('detected');
       } else if (providerToTest === 'openai') {
         if (!openAIKey.trim()) throw new Error("OpenAI API Key has not been entered.");
@@ -3265,8 +3429,7 @@ One-sentence scene summary:`;
         
         let titlePage = '';
         if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-            const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: titlePrompt });
+            const res = await generateContentServer({ model: geminiUtilityModel, contents: titlePrompt });
             titlePage = res.text || '';
             updateUsage(res);
         } else {
@@ -3313,8 +3476,7 @@ One-sentence scene summary:`;
 
             let batchText = '';
             if (provider === 'gemini') {
-                const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-                const streamResponse = await ai.models.generateContentStream({ model: geminiMainModel, contents: batchPrompt });
+                const streamResponse = generateContentStreamServer({ model: geminiMainModel, contents: batchPrompt });
                 for await (const chunk of streamResponse) {
                     if (stopRef.current) break;
                     const text = chunk.text || '';
@@ -3364,7 +3526,6 @@ One-sentence scene summary:`;
         
         let rawResponse = '';
         if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
             const systemInstruction = `You are an expert cinematographer. Regenerate prompts for this single scene, making them more vivid and detailed, while STRICTLY following the core directives.
 **CORE VISUAL DIRECTIVES (MANDATORY):**
 1.  **CHARACTER INTEGRITY:** The characters in the 'CASTING' section MUST be depicted exactly as described.
@@ -3382,7 +3543,7 @@ ${referenceContext ? referenceContext : "No specific character references provid
 3.  **VIDEO PROMPT DETAIL:** Provide three distinct cinematic interpretations.
 4.  **SORA/VEO/KLING PROMPT DETAIL:** A single, rich paragraph synthesizing the best ideas.
 Return ONLY a valid JSON object with keys: "description", "imagePrompt", "videoPrompts" (array of 3 strings), "soraPrompt".`;
-            const result = await ai.models.generateContent({
+            const result = await generateContentServer({
                 model: geminiMainModel,
                 contents: `Lyric: "${scene.lyric}"`,
                 config: {
@@ -3445,8 +3606,7 @@ Output ONLY the JSON data.`;
 
         let newPromptText = '';
         if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-            const result = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
+            const result = await generateContentServer({ model: geminiUtilityModel, contents: prompt });
             newPromptText = result.text || '';
             updateUsage(result);
         } else if (provider === 'ollama') {
@@ -3511,8 +3671,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
 
         let rawResponse = '';
         if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-            const result = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
+            const result = await generateContentServer({ model: geminiUtilityModel, contents: prompt });
             rawResponse = result.text || '';
             updateUsage(result);
         } else if (provider === 'ollama') {
@@ -3578,14 +3737,15 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
         base64Data = data.data?.[0]?.b64_json;
         mimeType = 'image/png';
       } else {
-        const activeKey = getEffectiveGeminiKey();
-        if (!activeKey) throw new Error("Google API Key is required for image generation. Please enter it in Settings.");
-        const ai = new GoogleGenAI({ apiKey: activeKey });
-  
         if (imageEngine === 'imagen') {
           mimeType = imageFormat;
-          const result = await ai.models.generateImages({ model: imagenModel, prompt, config: { numberOfImages: 1, outputMimeType: imageFormat } });
-          base64Data = result.generatedImages?.[0]?.image?.imageBytes;
+          const result = await generateImageServer({ 
+            engine: 'imagen', 
+            model: imagenModel, 
+            prompt, 
+            config: { numberOfImages: 1, outputMimeType: imageFormat } 
+          });
+          base64Data = result.base64Data;
         } else {
           const linkedRefs = visualRefs.filter(ref => storyboard[idx]?.linkedRefIds?.includes(ref.id));
           const finalRefs = linkedRefs.length > 0 ? linkedRefs : visualRefs.filter(r => prompt.toLowerCase().includes(r.name.toLowerCase()));
@@ -3611,11 +3771,15 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
           const contents: { parts: any[] } = { parts: imageParts.map(p => ({ inlineData: p! })) };
           contents.parts.push({ text: textPrompt });
   
-          const result = await ai.models.generateContent({ model: geminiImageModel, contents });
+          const result = await generateImageServer({ 
+            engine: 'gemini', 
+            model: geminiImageModel, 
+            prompt: textPrompt, 
+            contents 
+          });
           updateUsage(result);
-          const imagePart = result.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-          base64Data = imagePart?.inlineData?.data;
-          mimeType = imagePart?.inlineData?.mimeType || 'image/png';
+          base64Data = result.base64Data;
+          mimeType = result.mimeType || 'image/png';
         }
       }
   
@@ -3709,8 +3873,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
       const prompt = `Rewrite video prompt: "${originalPrompt}" to embody "${instruction}" technique. Keep it concise. Output raw text.`;
       let newPrompt = '';
       if (provider === 'gemini') { 
-        const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() }); 
-        const res = await ai.models.generateContent({ model: geminiMainModel, contents: prompt }); 
+        const res = await generateContentServer({ model: geminiMainModel, contents: prompt }); 
         newPrompt = res.text || ''; 
         updateUsage(res); 
       } else if (provider === 'ollama') { 
@@ -3827,11 +3990,12 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
     if (!storyboard) return;
     const selectedCount = storyboard.filter(s => s.isSelected).length;
     if (selectedCount === 0) return;
-    pushToHistory(`Updated camera movement to "${movementVal === 'none' ? 'Auto' : movementVal}" across ${selectedCount} scenes`);
 
     const movementOpt = CINEMATIC_CAMERA_MOVEMENTS.find(m => m.id === movementVal || m.name.toLowerCase() === movementVal.toLowerCase());
     const movementLabel = movementOpt ? movementOpt.name : movementVal;
     const movementTag = `[Camera Movement: ${movementLabel}]`;
+
+    pushToHistory(`Batch Set Camera: "${movementVal === 'none' ? 'Auto' : movementLabel}" across ${selectedCount} scenes`, 'batch-camera');
 
     const newSb = storyboard.map(s => {
       if (!s.isSelected) return s;
@@ -3862,7 +4026,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
     const selectedCount = storyboard.filter(s => s.isSelected).length;
     if (selectedCount === 0) return;
     const targetLabel = target === 'in' ? 'Transition In' : target === 'out' ? 'Transition Out' : 'Transitions (In & Out)';
-    pushToHistory(`Set ${targetLabel} to "${transitionVal}" across ${selectedCount} scenes`);
+    pushToHistory(`Batch Set ${targetLabel}: "${transitionVal}" across ${selectedCount} scenes`, 'batch-transition');
 
     const newSb = storyboard.map(s => {
       if (!s.isSelected) return s;
@@ -3894,7 +4058,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
       message: `Are you sure you want to delete ${selectedCount} selected scenes?`,
       type: 'danger',
       onConfirm: () => {
-        pushToHistory();
+        pushToHistory(`Deleted ${selectedCount} selected scenes`, 'batch-delete');
         const newStoryboard = storyboard.filter(s => !s.isSelected);
         setStoryboard(recalcTimeline(newStoryboard));
       }
@@ -4081,8 +4245,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
         const prompt = `Act as a master cinematographer. Provide a concise description of the style or vibe described by: "${customModalName}". Focus on lighting, color palette, camera movement, and aesthetic mood. This will be used in an influence library for a filmmaker.`;
         let text = '';
         if (provider === 'gemini') { 
-          const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() }); 
-          const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt }); 
+          const res = await generateContentServer({ model: geminiUtilityModel, contents: prompt }); 
           text = res.text || ''; 
           updateUsage(res); 
         } else { 
@@ -4108,8 +4271,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
         const prompt = `Describe the visual style of "${customModalName}" in one concise paragraph for a film director. Focus on lighting, colors, camera work, and mood.`;
         let text = '';
         if (provider === 'gemini') { 
-          const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() }); 
-          const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt }); 
+          const res = await generateContentServer({ model: geminiUtilityModel, contents: prompt }); 
           text = res.text || ''; 
           updateUsage(res); 
         } else { 
@@ -4131,8 +4293,7 @@ Note: "category" must be one of: "lighting", "camera", "color", "motion", "aesth
       const prompt = `Create a detailed, specific, and consistent physical description for a character named "${characterModalName}". Focus on concrete visual details like age, face shape, hair style and color, eye color, build, and distinctive features. This description will be used to ensure visual continuity in an AI image generator. Output only the description.`;
       let text = '';
       if (provider === 'gemini') {
-        const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-        const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
+        const res = await generateContentServer({ model: geminiUtilityModel, contents: prompt });
         text = res.text || '';
         updateUsage(res);
       } else {
@@ -4303,8 +4464,7 @@ Return ONLY a JSON object with keys:
 
             let rawJson = '';
             if (provider === 'gemini') {
-              const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-              const res = await ai.models.generateContent({
+              const res = await generateContentServer({
                 model: geminiUtilityModel,
                 contents: adaptPrompt,
                 config: {
@@ -4474,8 +4634,7 @@ Output ONLY valid JSON with keys:
       try {
         let rawJson = '';
         if (provider === 'gemini') {
-          const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-          const res = await ai.models.generateContent({
+          const res = await generateContentServer({
             model: geminiUtilityModel,
             contents: adaptPrompt,
             config: {
@@ -5107,13 +5266,6 @@ Output ONLY valid JSON with keys:
     setStoryboard(newSb);
   };
 
-  const handleSelectKey = async () => {
-    if (window.aistudio) {
-        await window.aistudio.openSelectKey();
-        setHasPaidKey(true);
-    }
-  };
-
   const handleVideoAction = (sceneId: string, prompt: string) => {
     if (videoProvider === 'google') {
         handleGenerateVideo(sceneId, prompt);
@@ -5131,69 +5283,27 @@ Output ONLY valid JSON with keys:
   };
 
   const handleGenerateVideo = async (sceneId: string, prompt: string) => {
-    if (!hasPaidKey && videoProvider === 'google') {
-        setErrorMessage({ 
-            title: "Paid API Key Required", 
-            body: "Video generation with Google Veo requires an API key from a project with billing enabled. Please select a valid key to proceed.", 
-            action: handleSelectKey 
-        });
-        return;
-    }
-
-    setVideoGenerationState(prev => ({ ...prev, [sceneId]: { status: 'Initializing...', startTime: Date.now() } }));
+    setVideoGenerationState(prev => ({ ...prev, [sceneId]: { status: 'Generating video on server...', startTime: Date.now() } }));
     setStoryboard(prev => prev ? prev.map(s => s.id === sceneId ? { ...s, videoStatus: 'generating' } : s) : null);
 
     try {
-        const gemKey = getEffectiveGeminiKey();
-        const ai = new GoogleGenAI({ apiKey: gemKey });
-        let operation = await ai.models.generateVideos({
-            model: 'veo-3.1-fast-generate-preview',
+        const result = await generateVideoServer({
             prompt: prompt,
+            model: 'veo-3.1-fast-generate-preview',
             config: {
                 numberOfVideos: 1,
                 resolution: '720p',
                 aspectRatio: '16:9'
             }
         });
-
-        while (!operation.done) {
-            await new Promise(resolve => setTimeout(resolve, 10000));
-            operation = await ai.operations.getVideosOperation({ operation: operation });
-        }
-
-        if (operation.error) {
-            throw new Error(String(operation.error.message));
-        }
-
-        const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-        if (!downloadLink) {
-            throw new Error("Video generation completed, but no download link was provided.");
-        }
-
-        const response = await fetch(downloadLink, {
-            method: 'GET',
-            headers: {
-                'x-goog-api-key': gemKey,
-            },
-        });
-        if (!response.ok) {
-            throw new Error(`Failed to download video: ${response.statusText}`);
-        }
-        const videoBlob = await response.blob();
-        const videoUrl = URL.createObjectURL(videoBlob);
-        
+        const videoUrl = result.videoUrl;
         setStoryboard(prev => prev ? prev.map(s => s.id === sceneId ? { ...s, videoStatus: 'completed', videoUrl: videoUrl } : s) : null);
-
     } catch (e: any) {
         console.error("Video Generation Error:", e);
         const errorMessage = e.message || 'An unknown error occurred.';
         setVideoGenerationState(prev => ({ ...prev, [sceneId]: { ...prev[sceneId], status: 'error', error: errorMessage } }));
         setStoryboard(prev => prev ? prev.map(s => s.id === sceneId ? { ...s, videoStatus: 'error' } : s) : null);
-
-        if (errorMessage.includes("Requested entity was not found.")) {
-            setHasPaidKey(false);
-            setErrorMessage({ title: "Invalid API Key", body: "The selected API key is not valid for video generation. Please select a key from a paid GCP project.", action: handleSelectKey });
-        }
+        setErrorMessage({ title: "Video Generation Error", body: errorMessage });
     }
   };
   
@@ -5245,8 +5355,7 @@ ${JSON.stringify(simplifiedBatch, null, 2)}
 
             let revisedJsonText = '';
             if (provider === 'gemini') {
-                const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-                const result = await ai.models.generateContent({
+                const result = await generateContentServer({
                     model: geminiMainModel,
                     contents: prompt,
                     config: {
@@ -5389,7 +5498,7 @@ ${JSON.stringify(simplifiedBatch, null, 2)}
     if (!storyboard) return;
     const selectedCount = storyboard.filter(s => s.isSelected).length;
     if (selectedCount === 0) return;
-    pushToHistory();
+    pushToHistory(`Apply Preset "${preset.name}" across ${selectedCount} scenes`, 'batch-preset');
 
     const newSb = storyboard.map(scene => {
       if (!scene.isSelected) return scene;
@@ -6421,88 +6530,98 @@ The old city. The weeping wall. Let's all go and remember.
                                 </div>
                             </div>
 
-                            {/* Bottom Tier: Full-Width Clean Wrapped Action Toolbar */}
-                            <div className="w-full max-w-full flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-white/10 bg-white/[0.02] px-2 py-1.5 rounded-lg box-border">
-                                {/* Left & Center Clusters: Selection, Playback, AI & Styling */}
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                    {/* Selection & Quick Nav */}
-                                    <button onClick={selectAllScenes} className="px-2.5 py-1 bg-white/5 hover:bg-white/10 text-white text-[10px] font-bold rounded-md border border-white/10 transition-all uppercase whitespace-nowrap">
-                                        Select All
-                                    </button>
-                                    <button onClick={toggleSlideshow} className={`flex items-center gap-1 px-2.5 py-1 border rounded-md text-[10px] font-bold transition-all uppercase whitespace-nowrap ${isSlideshowMode ? 'bg-blue-600 text-white border-blue-500' : 'bg-blue-900/20 text-blue-400 border-blue-500/30 hover:bg-blue-900/40'}`}>
-                                        <Maximize2 size={11}/> 
-                                        <span>Slideshow</span>
-                                    </button>
-                                    <button onClick={() => setShowSceneNavigator(true)} className="flex items-center gap-1 px-2.5 py-1 bg-blue-900/20 text-blue-400 border border-blue-500/30 rounded-md text-[10px] hover:bg-blue-900/40 font-bold transition-all uppercase whitespace-nowrap" title="Scene Quick Navigator">
-                                        <Compass size={11}/> 
-                                        <span>Navigator</span>
-                                    </button>
-
-                                    <div className="h-4 w-px bg-white/15 hidden sm:block shrink-0 mx-0.5" />
-
-                                    {/* AI Generation Cluster */}
-                                    {batchGenState.generating ? (
-                                        <button onClick={() => { stopRef.current = true; }} className="flex items-center gap-1 px-2.5 py-1 bg-red-900/40 text-red-400 border border-red-500/50 rounded-md text-[10px] hover:bg-red-900/60 font-bold transition-all uppercase whitespace-nowrap">
-                                            <StopCircle size={11}/>
-                                            <span>Stop ({batchGenState.current}/{batchGenState.total})</span>
+                            {/* 2-Tier Structured Action Toolbar: Clean, Balanced & Non-Wonky in Fullscreen */}
+                            <div className="w-full space-y-1.5 pt-2 border-t border-white/10 box-border">
+                                {/* Tier 1: Selection, Navigation & AI Story Studio */}
+                                <div className="w-full flex items-center justify-between flex-wrap gap-2 bg-white/[0.02] px-2.5 py-1.5 rounded-lg border border-white/5">
+                                    {/* Left Group: Selection & Quick Nav */}
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className="text-[9px] font-bold uppercase tracking-wider text-gray-500 mr-1 hidden sm:inline">Nav:</span>
+                                        <button onClick={selectAllScenes} className="px-2.5 py-1 bg-white/5 hover:bg-white/10 text-white text-[10px] font-bold rounded-md border border-white/10 transition-all uppercase whitespace-nowrap">
+                                            Select All
                                         </button>
-                                    ) : (
-                                        <button onClick={handleBatchGenerateImages} className="flex items-center gap-1 px-2.5 py-1 bg-teal-900/20 text-teal-400 border border-teal-500/30 rounded-md text-[10px] hover:bg-teal-900/40 font-bold transition-all uppercase disabled:opacity-50 whitespace-nowrap">
-                                            <Layers size={11}/>
-                                            <span>Generate All</span>
+                                        <button onClick={toggleSlideshow} className={`flex items-center gap-1 px-2.5 py-1 border rounded-md text-[10px] font-bold transition-all uppercase whitespace-nowrap ${isSlideshowMode ? 'bg-blue-600 text-white border-blue-500' : 'bg-blue-900/20 text-blue-400 border-blue-500/30 hover:bg-blue-900/40'}`}>
+                                            <Maximize2 size={11}/> 
+                                            <span>Slideshow</span>
                                         </button>
-                                    )}
+                                        <button onClick={() => setShowSceneNavigator(true)} className="flex items-center gap-1 px-2.5 py-1 bg-blue-900/20 text-blue-400 border border-blue-500/30 rounded-md text-[10px] hover:bg-blue-900/40 font-bold transition-all uppercase whitespace-nowrap" title="Scene Quick Navigator">
+                                            <Compass size={11}/> 
+                                            <span>Navigator</span>
+                                        </button>
+                                    </div>
 
-                                    <button onClick={handleGenerateAllSceneSummaries} disabled={isBatchSummarizing} className="flex items-center gap-1 px-2.5 py-1 bg-emerald-900/20 text-emerald-400 border border-emerald-500/30 rounded-md text-[10px] hover:bg-emerald-900/40 font-bold transition-all uppercase disabled:opacity-50 whitespace-nowrap" title="Generate one-sentence summaries for all scenes with AI">
-                                        {isBatchSummarizing ? <Loader2 size={11} className="animate-spin text-emerald-400" /> : <Wand2 size={11}/>} 
-                                        <span>{isBatchSummarizing ? `Summarizing (${(generatingSummaryIdx ?? 0) + 1}/${storyboard.length})` : 'AI Summaries'}</span>
-                                    </button>
+                                    {/* Right Group: AI Generation & Creative Tools */}
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className="text-[9px] font-bold uppercase tracking-wider text-teal-400/80 mr-1 hidden md:inline">AI Studio:</span>
+                                        {batchGenState.generating ? (
+                                            <button onClick={() => { stopRef.current = true; }} className="flex items-center gap-1 px-2.5 py-1 bg-red-900/40 text-red-400 border border-red-500/50 rounded-md text-[10px] hover:bg-red-900/60 font-bold transition-all uppercase whitespace-nowrap">
+                                                <StopCircle size={11}/>
+                                                <span>Stop ({batchGenState.current}/{batchGenState.total})</span>
+                                            </button>
+                                        ) : (
+                                            <button onClick={handleBatchGenerateImages} className="flex items-center gap-1 px-2.5 py-1 bg-teal-900/20 text-teal-400 border border-teal-500/30 rounded-md text-[10px] hover:bg-teal-900/40 font-bold transition-all uppercase disabled:opacity-50 whitespace-nowrap">
+                                                <Layers size={11}/>
+                                                <span>Generate All</span>
+                                            </button>
+                                        )}
 
-                                    <button onClick={() => { setBatchCharacterInitialRefId(null); setShowBatchCharacterModal(true); }} className="flex items-center gap-1 px-2.5 py-1 bg-cyan-900/20 text-cyan-400 border border-cyan-500/30 rounded-md text-[10px] hover:bg-cyan-900/40 font-bold transition-all uppercase whitespace-nowrap" title="Update character descriptions across selected scenes with AI">
-                                        <UserCheck size={11}/> 
-                                        <span>Update Cast</span>
-                                    </button>
+                                        <button onClick={handleGenerateAllSceneSummaries} disabled={isBatchSummarizing} className="flex items-center gap-1 px-2.5 py-1 bg-emerald-900/20 text-emerald-400 border border-emerald-500/30 rounded-md text-[10px] hover:bg-emerald-900/40 font-bold transition-all uppercase disabled:opacity-50 whitespace-nowrap" title="Generate one-sentence summaries for all scenes with AI">
+                                            {isBatchSummarizing ? <Loader2 size={11} className="animate-spin text-emerald-400" /> : <Wand2 size={11}/>} 
+                                            <span>{isBatchSummarizing ? `Summarizing (${(generatingSummaryIdx ?? 0) + 1}/${storyboard.length})` : 'AI Summaries'}</span>
+                                        </button>
 
-                                    <button onClick={() => setShowAIEditor(true)} className="flex items-center gap-1 px-2.5 py-1 bg-yellow-900/20 text-yellow-400 border border-yellow-500/30 rounded-md text-[10px] hover:bg-yellow-900/40 font-bold transition-all uppercase whitespace-nowrap">
-                                        <Pencil size={11}/> 
-                                        <span>AI Editor</span>
-                                    </button> 
+                                        <button onClick={() => { setBatchCharacterInitialRefId(null); setShowBatchCharacterModal(true); }} className="flex items-center gap-1 px-2.5 py-1 bg-cyan-900/20 text-cyan-400 border border-cyan-500/30 rounded-md text-[10px] hover:bg-cyan-900/40 font-bold transition-all uppercase whitespace-nowrap" title="Update character descriptions across selected scenes with AI">
+                                            <UserCheck size={11}/> 
+                                            <span>Update Cast</span>
+                                        </button>
 
-                                    <button onClick={() => setShowSoraBuilder(true)} className="flex items-center gap-1 px-2.5 py-1 bg-orange-900/20 text-orange-400 border border-orange-500/30 rounded-md text-[10px] hover:bg-orange-900/40 font-bold transition-all uppercase whitespace-nowrap" title="Video Prompt Builder">
-                                        <MonitorPlay size={11}/> 
-                                        <span>Prompts</span>
-                                    </button>
+                                        <button onClick={() => setShowAIEditor(true)} className="flex items-center gap-1 px-2.5 py-1 bg-yellow-900/20 text-yellow-400 border border-yellow-500/30 rounded-md text-[10px] hover:bg-yellow-900/40 font-bold transition-all uppercase whitespace-nowrap">
+                                            <Pencil size={11}/> 
+                                            <span>AI Editor</span>
+                                        </button> 
 
-                                    <button onClick={handleGenerateScript} className="flex items-center gap-1 px-2.5 py-1 bg-purple-900/20 text-purple-400 border border-purple-500/30 rounded-md text-[10px] hover:bg-purple-900/40 font-bold transition-all uppercase whitespace-nowrap">
-                                        <ScrollText size={11}/> 
-                                        <span>Script</span>
-                                    </button>
+                                        <button onClick={() => setShowSoraBuilder(true)} className="flex items-center gap-1 px-2.5 py-1 bg-orange-900/20 text-orange-400 border border-orange-500/30 rounded-md text-[10px] hover:bg-orange-900/40 font-bold transition-all uppercase whitespace-nowrap" title="Video Prompt Builder">
+                                            <MonitorPlay size={11}/> 
+                                            <span>Prompts</span>
+                                        </button>
 
-                                    <div className="h-4 w-px bg-white/15 hidden sm:block shrink-0 mx-0.5" />
+                                        <button onClick={handleGenerateScript} className="flex items-center gap-1 px-2.5 py-1 bg-purple-900/20 text-purple-400 border border-purple-500/30 rounded-md text-[10px] hover:bg-purple-900/40 font-bold transition-all uppercase whitespace-nowrap">
+                                            <ScrollText size={11}/> 
+                                            <span>Script</span>
+                                        </button>
+                                    </div>
+                                </div>
 
-                                    {/* Visual Style & Timing Tools */}
-                                    <button onClick={() => { setColorGradeFocusSceneIndex(null); setShowColorGradeModal(true); }} className="flex items-center gap-1 px-2.5 py-1 bg-purple-900/30 text-purple-300 border border-purple-500/40 rounded-md text-[10px] hover:bg-purple-900/50 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="Analyze visual style and generate color grading filters for image prompts">
-                                        <Palette size={11} className="text-purple-400"/> 
-                                        <span>Color Grade</span>
-                                    </button>
+                                {/* Tier 2: Visual Style, Audio Rhythm & Master Delivery */}
+                                <div className="w-full flex items-center justify-between flex-wrap gap-2 bg-black/25 px-2.5 py-1.5 rounded-lg border border-white/5">
+                                    {/* Left Group: Visual Style & Tone */}
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className="text-[9px] font-bold uppercase tracking-wider text-purple-400/80 mr-1 hidden sm:inline">Style & Look:</span>
+                                        <button onClick={() => { setColorGradeFocusSceneIndex(null); setShowColorGradeModal(true); }} className="flex items-center gap-1 px-2.5 py-1 bg-purple-900/30 text-purple-300 border border-purple-500/40 rounded-md text-[10px] hover:bg-purple-900/50 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="Analyze visual style and generate color grading filters for image prompts">
+                                            <Palette size={11} className="text-purple-400"/> 
+                                            <span>Color Grade</span>
+                                        </button>
 
-                                    <button onClick={() => setShowStyleRefinerModal(true)} className="flex items-center gap-1 px-2.5 py-1 bg-amber-900/30 text-amber-300 border border-amber-500/40 rounded-md text-[10px] hover:bg-amber-900/50 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="AI Style Refiner: Apply cohesive cinematic visual filters to scenes">
-                                        <Sparkles size={11} className="text-amber-400"/> 
-                                        <span>Style Refiner</span>
-                                    </button>
+                                        <button onClick={() => setShowStyleRefinerModal(true)} className="flex items-center gap-1 px-2.5 py-1 bg-amber-900/30 text-amber-300 border border-amber-500/40 rounded-md text-[10px] hover:bg-amber-900/50 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="AI Style Refiner: Apply cohesive cinematic visual filters to scenes">
+                                            <Sparkles size={11} className="text-amber-400"/> 
+                                            <span>Style Refiner</span>
+                                        </button>
 
-                                    <button onClick={() => { setContrastBoosterFocusSceneIndex(null); setShowContrastBoosterModal(true); }} className="flex items-center gap-1 px-2.5 py-1 bg-indigo-900/30 text-indigo-300 border border-indigo-500/40 rounded-md text-[10px] hover:bg-indigo-900/50 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="AI Contrast Booster: Analyze selected scenes and automatically adjust keywords for dramatic contrast & visual depth">
-                                        <Contrast size={11} className="text-indigo-400"/> 
-                                        <span>Contrast Booster</span>
-                                    </button>
+                                        <button onClick={() => { setContrastBoosterFocusSceneIndex(null); setShowContrastBoosterModal(true); }} className="flex items-center gap-1 px-2.5 py-1 bg-indigo-900/30 text-indigo-300 border border-indigo-500/40 rounded-md text-[10px] hover:bg-indigo-900/50 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="AI Contrast Booster: Analyze selected scenes and automatically adjust keywords for dramatic contrast & visual depth">
+                                            <Contrast size={11} className="text-indigo-400"/> 
+                                            <span>Contrast Booster</span>
+                                        </button>
 
-                                    <button onClick={() => { setPresetTargetSceneIndex(null); setInitialPresetData(null); setShowPromptPresetsModal(true); }} className="flex items-center gap-1 px-2.5 py-1 bg-violet-900/20 text-violet-400 border border-violet-500/30 rounded-md text-[10px] hover:bg-violet-900/40 font-bold transition-all uppercase whitespace-nowrap" title="Open Storyboard Prompt Presets Library">
-                                        <SlidersHorizontal size={11}/> 
-                                        <span>Presets</span>
-                                    </button>
+                                        <button onClick={() => { setPresetTargetSceneIndex(null); setInitialPresetData(null); setShowPromptPresetsModal(true); }} className="flex items-center gap-1 px-2.5 py-1 bg-violet-900/20 text-violet-400 border border-violet-500/30 rounded-md text-[10px] hover:bg-violet-900/40 font-bold transition-all uppercase whitespace-nowrap" title="Open Storyboard Prompt Presets Library">
+                                            <SlidersHorizontal size={11}/> 
+                                            <span>Presets</span>
+                                        </button>
+                                    </div>
 
+                                    {/* Center Group: Audio Rhythm & Beat Snapping */}
                                     {audioIntensityData && (
-                                        <>
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                            <span className="text-[9px] font-bold uppercase tracking-wider text-cyan-400/80 mr-1 hidden md:inline">Rhythm:</span>
                                             <button onClick={() => handleSnapToBeats()} className="flex items-center gap-1 px-2.5 py-1 bg-cyan-950/80 text-cyan-300 border border-cyan-500/40 rounded-md text-[10px] hover:bg-cyan-900/60 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="Snap scene durations to audio peak drops">
                                                 <Zap size={11} className="text-amber-400 fill-amber-400"/> 
                                                 <span>Snap Beats</span>
@@ -6511,20 +6630,21 @@ The old city. The weeping wall. Let's all go and remember.
                                                 <Scissors size={11} className="text-pink-400"/> 
                                                 <span>Beat Split</span>
                                             </button>
-                                        </>
+                                        </div>
                                     )}
-                                </div>
 
-                                {/* Right Cluster: Export & Animatic Render */}
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                    <button onClick={() => setShowAnimaticModal(true)} className="flex items-center gap-1 px-2.5 py-1 bg-cyan-900/20 text-cyan-400 border border-cyan-500/30 rounded-md text-[10px] hover:bg-cyan-900/40 font-bold transition-all uppercase whitespace-nowrap">
-                                        <Film size={11}/> 
-                                        <span>Animatic</span>
-                                    </button>
-                                    <button onClick={() => setShowExport(true)} className="flex items-center gap-1 px-2.5 py-1 bg-green-900/20 text-green-400 border border-green-500/30 rounded-md text-[10px] hover:bg-green-900/40 font-bold transition-all uppercase whitespace-nowrap">
-                                        <Share2 size={11}/> 
-                                        <span>Export</span>
-                                    </button>
+                                    {/* Right Group: Master Delivery & Export */}
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                        <span className="text-[9px] font-bold uppercase tracking-wider text-green-400/80 mr-1 hidden sm:inline">Delivery:</span>
+                                        <button onClick={() => setShowAnimaticModal(true)} className="flex items-center gap-1 px-2.5 py-1 bg-cyan-900/20 text-cyan-400 border border-cyan-500/30 rounded-md text-[10px] hover:bg-cyan-900/40 font-bold transition-all uppercase whitespace-nowrap">
+                                            <Film size={11}/> 
+                                            <span>Animatic</span>
+                                        </button>
+                                        <button onClick={() => setShowExport(true)} className="flex items-center gap-1 px-2.5 py-1 bg-green-900/20 text-green-400 border border-green-500/30 rounded-md text-[10px] hover:bg-green-900/40 font-bold transition-all uppercase whitespace-nowrap">
+                                            <Share2 size={11}/> 
+                                            <span>Export</span>
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -6949,7 +7069,7 @@ The old city. The weeping wall. Let's all go and remember.
                                                 <span>Prompt Tuning, Camera & Transitions</span>
                                             </div>
                                             <div className="pl-6 space-y-3">
-                                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                                                     <div>
                                                         <div className="flex items-center justify-between mb-1">
                                                             <label className="text-[10px] uppercase font-bold text-gray-500 flex items-center gap-1">
@@ -7002,12 +7122,16 @@ The old city. The weeping wall. Let's all go and remember.
                                                             onChange={(e) => { const newSb = [...storyboard!]; newSb[idx].transitionIn = e.target.value; setStoryboard(newSb); }}
                                                             className="w-full bg-black/40 border border-white/10 rounded p-1.5 text-xs text-gray-300 outline-none focus:border-white/30"
                                                         >
-                                                            <option value="none">None</option>
+                                                            <option value="none">None (Cut)</option>
                                                             <option value="fade">Fade</option>
+                                                            <option value="dissolve">Dissolve</option>
                                                             <option value="slide-left">Slide Left</option>
                                                             <option value="slide-right">Slide Right</option>
                                                             <option value="zoom-in">Zoom In</option>
-                                                            <option value="dissolve">Dissolve</option>
+                                                            <option value="glitch">Glitch</option>
+                                                            <option value="flash-white">White Flash</option>
+                                                            <option value="cross-blur">Cross Blur</option>
+                                                            <option value="whip-pan">Whip Pan</option>
                                                         </select>
                                                     </div>
                                                     <div>
@@ -7017,12 +7141,40 @@ The old city. The weeping wall. Let's all go and remember.
                                                             onChange={(e) => { const newSb = [...storyboard!]; newSb[idx].transitionOut = e.target.value; setStoryboard(newSb); }}
                                                             className="w-full bg-black/40 border border-white/10 rounded p-1.5 text-xs text-gray-300 outline-none focus:border-white/30"
                                                         >
-                                                            <option value="none">None</option>
+                                                            <option value="none">None (Cut)</option>
                                                             <option value="fade">Fade</option>
+                                                            <option value="dissolve">Dissolve</option>
                                                             <option value="slide-left">Slide Left</option>
                                                             <option value="slide-right">Slide Right</option>
                                                             <option value="zoom-out">Zoom Out</option>
-                                                            <option value="dissolve">Dissolve</option>
+                                                            <option value="dip-to-black">Dip to Black</option>
+                                                            <option value="glitch">Glitch</option>
+                                                            <option value="flash-white">White Flash</option>
+                                                            <option value="cross-blur">Cross Blur</option>
+                                                        </select>
+                                                    </div>
+                                                    <div>
+                                                        <div className="flex items-center justify-between mb-1">
+                                                            <label className="text-[10px] uppercase font-bold text-gray-500 flex items-center gap-1">
+                                                                <Clock size={10} className="text-cyan-400" /> Timing
+                                                            </label>
+                                                            <span className="text-[8px] font-mono text-cyan-400 bg-cyan-950/60 px-1 rounded">
+                                                                {scene.transitionDuration || 0.8}s
+                                                            </span>
+                                                        </div>
+                                                        <select 
+                                                            value={scene.transitionDuration || 0.8} 
+                                                            onChange={(e) => { const newSb = [...storyboard!]; newSb[idx].transitionDuration = parseFloat(e.target.value); setStoryboard(newSb); }}
+                                                            className="w-full bg-black/40 border border-white/10 rounded p-1.5 text-xs text-gray-300 outline-none focus:border-white/30 font-mono"
+                                                        >
+                                                            <option value="0.2">0.2s (Rapid Snappy)</option>
+                                                            <option value="0.3">0.3s (Strobe / Hit)</option>
+                                                            <option value="0.5">0.5s (Sharp Cut)</option>
+                                                            <option value="0.8">0.8s (Standard)</option>
+                                                            <option value="1.0">1.0s (Cinematic)</option>
+                                                            <option value="1.5">1.5s (Lyrical Blend)</option>
+                                                            <option value="2.0">2.0s (Dramatic)</option>
+                                                            <option value="3.0">3.0s (Smooth Fade)</option>
                                                         </select>
                                                     </div>
                                                 </div>
@@ -7510,86 +7662,46 @@ The old city. The weeping wall. Let's all go and remember.
                                 
                                 {provider === 'gemini' && (
                                   <div className="space-y-4">
-                                    <div>
-                                        <div className="flex justify-between items-center mb-1">
-                                            <label className="text-xs font-bold text-gray-400">Gemini API Key</label>
-                                            <a 
-                                                href="https://aistudio.google.com/app/apikey" 
-                                                target="_blank" 
-                                                rel="noopener noreferrer" 
-                                                className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center gap-1 underline"
-                                            >
-                                                Get free Gemini API Key <ExternalLink size={10}/>
-                                            </a>
+                                    <div className="p-3 bg-blue-950/30 border border-blue-500/30 rounded-xl flex items-center justify-between">
+                                      <div className="flex items-center gap-2.5">
+                                        <Sparkles size={16} className="text-blue-400 shrink-0" />
+                                        <div>
+                                          <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                                            <span>Full-Stack Server Gemini API</span>
+                                            <span className="text-[9px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded font-mono">Server Ready</span>
+                                          </div>
+                                          <p className="text-[11px] text-gray-400 mt-0.5">
+                                            Model calls are executed via server-side endpoints (/api/gemini/*). Key is managed in Settings &gt; Secrets.
+                                          </p>
                                         </div>
-                                        <div className="flex items-center gap-2">
-                                            <div className="relative flex-1 flex items-center">
-                                                <input 
-                                                    type={showGeminiKeySecret ? "text" : "password"} 
-                                                    placeholder="Paste AIzaSy... API key here (persisted in browser)" 
-                                                    value={geminiApiKey} 
-                                                    onChange={e => handleUpdateGeminiKey(e.target.value)} 
-                                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm outline-none focus:border-white/30 transition-colors pr-10 font-mono text-gray-200"
-                                                />
-                                                <button 
-                                                    type="button" 
-                                                    onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
-                                                    className="absolute right-2 p-1 text-gray-400 hover:text-gray-200" 
-                                                    title={showGeminiKeySecret ? "Hide API Key" : "Show API Key"}
-                                                >
-                                                    {showGeminiKeySecret ? <EyeOff size={14}/> : <Eye size={14}/>}
-                                                </button>
-                                            </div>
-                                            <button 
-                                                type="button"
-                                                onClick={() => handleTestConnection('gemini')}
-                                                disabled={testStatuses.gemini === 'testing'}
-                                                className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all shrink-0 ${
-                                                    testStatuses.gemini === 'testing'
-                                                        ? 'bg-blue-600/50 text-blue-200 cursor-wait'
-                                                        : testStatuses.gemini === 'ok'
-                                                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm'
-                                                        : testStatuses.gemini === 'error'
-                                                        ? 'bg-red-600 hover:bg-red-500 text-white shadow-sm'
-                                                        : 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm'
-                                                }`}
-                                                title="Perform a small non-destructive API ping to verify this Gemini key"
-                                            >
-                                                {testStatuses.gemini === 'testing' ? (
-                                                    <><Loader2 size={13} className="animate-spin"/> Testing...</>
-                                                ) : testStatuses.gemini === 'ok' ? (
-                                                    <><Check size={13}/> Valid Key</>
-                                                ) : testStatuses.gemini === 'error' ? (
-                                                    <><X size={13}/> Test Failed</>
-                                                ) : (
-                                                    <><Zap size={13}/> Test Key</>
-                                                )}
-                                            </button>
-                                        </div>
-                                        {testStatuses.gemini === 'ok' && (
-                                            <p className="text-emerald-400 text-xs mt-1.5 flex items-center gap-1 font-medium animate-in fade-in">
-                                                <Check size={13} className="shrink-0 text-emerald-400"/> Key verified successfully! Gemini API is responding.
-                                            </p>
+                                      </div>
+                                      <button 
+                                        type="button"
+                                        onClick={() => handleTestConnection('gemini')}
+                                        disabled={testStatuses.gemini === 'testing'}
+                                        className="px-3 py-1.5 text-xs font-bold rounded-lg flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white shadow-sm transition-all shrink-0"
+                                      >
+                                        {testStatuses.gemini === 'testing' ? (
+                                          <><Loader2 size={12} className="animate-spin" /> Verifying...</>
+                                        ) : testStatuses.gemini === 'ok' ? (
+                                          <><Check size={12} className="text-emerald-300" /> Verified</>
+                                        ) : testStatuses.gemini === 'error' ? (
+                                          <><X size={12} className="text-red-300" /> Failed</>
+                                        ) : (
+                                          <><Zap size={12} /> Test Server</>
                                         )}
-                                        {testStatuses.gemini === 'error' && connectionError && (
-                                            <p className="text-red-400 text-xs mt-1.5 flex items-center gap-1.5 bg-red-900/30 p-2 rounded border border-red-500/30 leading-tight animate-in fade-in">
-                                                <AlertTriangle size={13} className="shrink-0 text-red-400"/> {connectionError}
-                                            </p>
-                                        )}
-                                        <div className="flex items-center justify-between mt-1">
-                                            <span className="text-[11px] text-gray-500">
-                                                Required when deployed to Vercel, Netlify, or running standalone.
-                                            </span>
-                                            {geminiApiKey && (
-                                                <button 
-                                                    onClick={() => handleUpdateGeminiKey('')} 
-                                                    className="text-[11px] text-gray-400 hover:text-red-400 transition-colors"
-                                                >
-                                                    Clear Key
-                                                </button>
-                                            )}
-                                        </div>
+                                      </button>
                                     </div>
+                                    {testStatuses.gemini === 'ok' && (
+                                      <p className="text-emerald-400 text-xs flex items-center gap-1 font-medium">
+                                        <Check size={13} className="shrink-0 text-emerald-400"/> Gemini server connection is healthy and responsive.
+                                      </p>
+                                    )}
+                                    {testStatuses.gemini === 'error' && connectionError && (
+                                      <p className="text-red-400 text-xs flex items-center gap-1.5 bg-red-900/30 p-2 rounded border border-red-500/30">
+                                        <AlertTriangle size={13} className="shrink-0 text-red-400"/> {connectionError}
+                                      </p>
+                                    )}
                                     <div className="flex items-end gap-2">
                                         <div className="flex-1">
                                             <div className="flex justify-between items-center mb-1">
@@ -7945,123 +8057,46 @@ The old city. The weeping wall. Let's all go and remember.
                             </div>
 
                             <div className="bg-[#1a1a1a] p-4 rounded-lg border border-white/10">
-                                <h5 className="font-bold text-gray-200 mb-2 text-sm flex items-center gap-2">1. Google Gemini API Key Configuration</h5>
+                                <h5 className="font-bold text-gray-200 mb-2 text-sm flex items-center gap-2"><Sparkles size={16} className="text-blue-400"/> 1. Full-Stack Google Gemini API Status</h5>
                                 <div className="flex flex-col gap-3">
                                     <div className="flex items-center justify-between">
-                                        <div className="flex items-center gap-3">
-                                            {apiKeyStatus === 'detected' ? (
-                                                <div className="flex items-center gap-2 text-green-400">
-                                                    <ShieldCheck size={18} />
-                                                    <span className="font-bold">Gemini API Key Active</span>
-                                                </div>
+                                        <div className="flex items-center gap-2.5">
+                                            <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400 animate-pulse" />
+                                            <span className="font-bold text-white text-sm">Server-Side Integration Active</span>
+                                        </div>
+                                        <button 
+                                            type="button"
+                                            onClick={() => handleTestConnection('gemini')} 
+                                            disabled={testStatuses.gemini === 'testing'}
+                                            className="px-3.5 py-1.5 text-xs font-bold rounded-lg flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white shadow-sm transition-all"
+                                        >
+                                            {testStatuses.gemini === 'testing' ? (
+                                                <><Loader2 size={13} className="animate-spin"/> Testing Server...</>
+                                            ) : testStatuses.gemini === 'ok' ? (
+                                                <><Check size={13}/> Server Verified</>
+                                            ) : testStatuses.gemini === 'error' ? (
+                                                <><X size={13}/> Test Failed</>
                                             ) : (
-                                                <div className="flex items-center gap-2 text-red-400">
-                                                    <AlertTriangle size={18} />
-                                                    <span className="font-bold">Gemini API Key Not Found</span>
-                                                </div>
+                                                <><Zap size={13}/> Test Connection</>
                                             )}
-                                        </div>
-                                        {geminiApiKey && (
-                                            <button 
-                                                onClick={() => handleUpdateGeminiKey('')} 
-                                                className="text-xs text-gray-400 hover:text-red-400 transition-colors"
-                                            >
-                                                Clear Saved Key
-                                            </button>
-                                        )}
+                                        </button>
                                     </div>
 
-                                    <div>
-                                        <div className="flex justify-between items-center mb-1">
-                                            <label className="text-xs font-bold text-gray-400">Enter / Paste Gemini API Key</label>
-                                            <a 
-                                                href="https://aistudio.google.com/app/apikey" 
-                                                target="_blank" 
-                                                rel="noopener noreferrer" 
-                                                className="text-[11px] text-blue-400 hover:text-blue-300 flex items-center gap-1 underline"
-                                            >
-                                                Get a free Gemini API Key <ExternalLink size={11}/>
-                                            </a>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <div className="relative flex-1 flex items-center">
-                                                <input 
-                                                    type={showGeminiKeySecret ? "text" : "password"} 
-                                                    placeholder="Paste your AIzaSy... key here" 
-                                                    value={geminiApiKey} 
-                                                    onChange={e => handleUpdateGeminiKey(e.target.value)} 
-                                                    className="w-full bg-black/40 border border-white/10 rounded-lg p-2 text-sm outline-none focus:border-white/30 transition-colors pr-10 font-mono text-gray-200"
-                                                />
-                                                <button 
-                                                    type="button" 
-                                                    onClick={() => setShowGeminiKeySecret(!showGeminiKeySecret)} 
-                                                    className="absolute right-2 p-1 text-gray-400 hover:text-gray-200" 
-                                                    title={showGeminiKeySecret ? "Hide API Key" : "Show API Key"}
-                                                >
-                                                    {showGeminiKeySecret ? <EyeOff size={14}/> : <Eye size={14}/>}
-                                                </button>
-                                            </div>
-                                            <button 
-                                                type="button"
-                                                onClick={() => handleTestConnection('gemini')} 
-                                                disabled={testStatuses.gemini === 'testing'}
-                                                className={`px-3.5 py-2 text-xs font-bold rounded-lg flex items-center gap-1.5 transition-all shrink-0 ${
-                                                    testStatuses.gemini === 'testing'
-                                                        ? 'bg-blue-600/50 text-blue-200 cursor-wait'
-                                                        : testStatuses.gemini === 'ok'
-                                                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm'
-                                                        : testStatuses.gemini === 'error'
-                                                        ? 'bg-red-600 hover:bg-red-500 text-white shadow-sm'
-                                                        : 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm'
-                                                }`}
-                                                title="Perform a small non-destructive API ping to verify this Gemini key"
-                                            >
-                                                {testStatuses.gemini === 'testing' ? (
-                                                    <><Loader2 size={13} className="animate-spin"/> Testing...</>
-                                                ) : testStatuses.gemini === 'ok' ? (
-                                                    <><Check size={13}/> Valid Key</>
-                                                ) : testStatuses.gemini === 'error' ? (
-                                                    <><X size={13}/> Test Failed</>
-                                                ) : (
-                                                    <><Zap size={13}/> Test Key</>
-                                                )}
-                                            </button>
-                                        </div>
-
-                                        {testStatuses.gemini === 'ok' && (
-                                            <p className="text-emerald-400 text-xs mt-1.5 flex items-center gap-1 font-medium animate-in fade-in">
-                                                <Check size={13} className="shrink-0 text-emerald-400"/> Key verified successfully! Gemini API is responding.
-                                            </p>
-                                        )}
-                                        {testStatuses.gemini === 'error' && connectionError && (
-                                            <p className="text-red-400 text-xs mt-1.5 flex items-center gap-1.5 bg-red-900/30 p-2 rounded border border-red-500/30 leading-tight animate-in fade-in">
-                                                <AlertTriangle size={13} className="shrink-0 text-red-400"/> {connectionError}
-                                            </p>
-                                        )}
-
-                                        {typeof window !== 'undefined' && (window as any).aistudio && (
-                                            <div className="pt-2">
-                                                <button 
-                                                    type="button"
-                                                    onClick={async () => {
-                                                        if ((window as any).aistudio) {
-                                                            await (window as any).aistudio.openSelectKey();
-                                                            setApiKeyStatus('detected');
-                                                            setHasPaidKey(true);
-                                                        }
-                                                    }}
-                                                    className="w-full py-2 px-3 bg-white/10 hover:bg-white/20 border border-white/10 text-white text-xs font-bold rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                                                >
-                                                    <Key size={14} /> AI Studio Key Selector
-                                                </button>
-                                            </div>
-                                        )}
-                                    </div>
+                                    {testStatuses.gemini === 'ok' && (
+                                        <p className="text-emerald-400 text-xs flex items-center gap-1 font-medium animate-in fade-in">
+                                            <Check size={13} className="shrink-0 text-emerald-400"/> Server verified successfully! Gemini API is responding.
+                                        </p>
+                                    )}
+                                    {testStatuses.gemini === 'error' && connectionError && (
+                                        <p className="text-red-400 text-xs flex items-center gap-1.5 bg-red-900/30 p-2 rounded border border-red-500/30 leading-tight animate-in fade-in">
+                                            <AlertTriangle size={13} className="shrink-0 text-red-400"/> {connectionError}
+                                        </p>
+                                    )}
 
                                     <div className="bg-blue-950/20 border border-blue-800/30 rounded p-3 text-xs text-blue-200/80 space-y-1.5">
-                                        <p className="font-semibold text-blue-200">🚀 Using this app on Vercel or standalone hosting:</p>
-                                        <p>• <strong>Direct In-App Use:</strong> Paste your Gemini API key above and click <em>Test Key Connection</em>. The key is securely saved in your browser's local storage and used immediately—no rebuild needed!</p>
-                                        <p>• <strong>Vercel Environment Variable:</strong> You can also set <code>GEMINI_API_KEY</code> or <code>VITE_GEMINI_API_KEY</code> in your Vercel Project Settings &rarr; Environment Variables. Note that because Vite builds static assets, you must click <strong>Redeploy</strong> in Vercel after adding the variable.</p>
+                                        <p className="font-semibold text-blue-200">🚀 Full-Stack Server Architecture:</p>
+                                        <p>• All Gemini requests (prompts, structured JSON, streaming scripts, image rendering, and video) run directly on the backend server.</p>
+                                        <p>• The attached API key is read server-side from <code>process.env.GEMINI_API_KEY</code> and can be configured in <strong>Settings &gt; Secrets</strong>.</p>
                                     </div>
                                 </div>
                             </div>
@@ -8505,8 +8540,7 @@ The old city. The weeping wall. Let's all go and remember.
         onAutoDescribeCharacter={async (name: string) => {
           const prompt = `Create a detailed, specific physical description for a character named "${name}". Focus on concrete visual details like age, facial structure, hair style and color, eye color, build, skin tone, clothing style, and distinguishing visual marks. Output only the description in 1 concise paragraph.`;
           if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-            const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
+            const res = await generateContentServer({ model: geminiUtilityModel, contents: prompt });
             return (res.text || '').trim();
           } else {
             const res = await performProviderRequest(prompt);
@@ -8529,8 +8563,7 @@ The old city. The weeping wall. Let's all go and remember.
         onAutoDescribeCharacter={async (name: string, seed?: string) => {
           const prompt = `Create a detailed, cinema-grade physical description for a character named "${name}". ${seed ? `Incorporate or expand on these existing features: "${seed}".` : ''} Focus on concrete visual details including ethnicity/age, facial features, eyes, hair style/color/texture, distinctive wardrobe, clothing fabric textures, accessories/props, and visual atmosphere. Return only the description in 1 concise paragraph suitable for AI image and video generation prompts.`;
           if (provider === 'gemini') {
-            const ai = new GoogleGenAI({ apiKey: getEffectiveGeminiKey() });
-            const res = await ai.models.generateContent({ model: geminiUtilityModel, contents: prompt });
+            const res = await generateContentServer({ model: geminiUtilityModel, contents: prompt });
             return (res.text || '').trim();
           } else {
             const res = await performProviderRequest(prompt);

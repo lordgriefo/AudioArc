@@ -210,6 +210,77 @@ export const AnimaticPreviewWindow: React.FC<AnimaticPreviewWindowProps> = ({
     };
   }, []);
 
+  // Dynamic Transition Effect calculation based on transitionIn, transitionOut, and transitionDuration
+  const transitionStyle = useMemo<React.CSSProperties>(() => {
+    if (!activeScene) return {};
+    const transIn = activeScene.transitionIn || 'none';
+    const transOut = activeScene.transitionOut || 'none';
+    const transDur = activeScene.transitionDuration || 0.8;
+
+    // Calculate start time of active scene
+    let sceneStart = 0;
+    for (let i = 0; i < activeSceneIndex; i++) {
+      sceneStart += storyboard[i]?.duration || 4;
+    }
+    const sceneDur = activeScene.duration || 4;
+    const timeIn = currentTime - sceneStart;
+    const timeOut = sceneDur - timeIn;
+
+    // Transition IN phase
+    if (timeIn >= 0 && timeIn < transDur && transIn !== 'none') {
+      const progress = Math.min(1, Math.max(0, timeIn / transDur));
+      if (transIn === 'fade' || transIn === 'dissolve') {
+        return { opacity: progress };
+      }
+      if (transIn === 'zoom-in') {
+        return { transform: `scale(${0.82 + (0.18 * progress)})`, opacity: Math.min(1, progress * 1.3) };
+      }
+      if (transIn === 'slide-left') {
+        return { transform: `translateX(${(1 - progress) * 50}px)`, opacity: progress };
+      }
+      if (transIn === 'slide-right') {
+        return { transform: `translateX(${-(1 - progress) * 50}px)`, opacity: progress };
+      }
+      if (transIn === 'cross-blur') {
+        return { filter: `blur(${(1 - progress) * 12}px)`, opacity: progress };
+      }
+      if (transIn === 'flash-white') {
+        return { filter: `brightness(${1 + (1 - progress) * 4})`, opacity: progress };
+      }
+      if (transIn === 'glitch') {
+        return { filter: progress < 0.6 ? 'hue-rotate(90deg) contrast(140%)' : undefined };
+      }
+    }
+
+    // Transition OUT phase
+    if (timeOut >= 0 && timeOut < transDur && transOut !== 'none') {
+      const progress = Math.min(1, Math.max(0, timeOut / transDur)); // 1 down to 0
+      if (transOut === 'fade' || transOut === 'dissolve' || transOut === 'dip-to-black') {
+        return { opacity: progress };
+      }
+      if (transOut === 'zoom-out') {
+        return { transform: `scale(${1 - (0.18 * (1 - progress))})`, opacity: progress };
+      }
+      if (transOut === 'slide-right') {
+        return { transform: `translateX(${(1 - progress) * 50}px)`, opacity: progress };
+      }
+      if (transOut === 'slide-left') {
+        return { transform: `translateX(${-(1 - progress) * 50}px)`, opacity: progress };
+      }
+      if (transOut === 'flash-white') {
+        return { filter: `brightness(${1 + (1 - progress) * 4})` };
+      }
+      if (transOut === 'cross-blur') {
+        return { filter: `blur(${(1 - progress) * 12}px)` };
+      }
+      if (transOut === 'glitch') {
+        return { filter: progress < 0.6 ? 'hue-rotate(180deg) invert(25%)' : undefined };
+      }
+    }
+
+    return {};
+  }, [activeScene, activeSceneIndex, currentTime, storyboard]);
+
   // Primary image or video source
   const primaryMediaUrl = composition.mainVisualClip?.mediaUrl || activeScene?.generatedImage || activeScene?.videoUrl;
   const isVideo = activeScene?.videoUrl || composition.mainVisualClip?.type === 'video';
@@ -229,6 +300,7 @@ export const AnimaticPreviewWindow: React.FC<AnimaticPreviewWindowProps> = ({
           <video 
             src={primaryMediaUrl} 
             className="w-full h-full object-contain animatic-primary-frame"
+            style={transitionStyle}
             autoPlay={isPlaying}
             muted
             loop
@@ -237,12 +309,16 @@ export const AnimaticPreviewWindow: React.FC<AnimaticPreviewWindowProps> = ({
           <img 
             src={primaryMediaUrl} 
             alt={activeScene?.description || `Scene ${activeSceneIndex + 1}`}
+            style={transitionStyle}
             className="w-full h-full object-contain animatic-primary-frame transition-opacity duration-200"
           />
         )
       ) : (
         /* Stylized Storyboard Animatic Slate Placeholder */
-        <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-gradient-to-br from-gray-950 via-[#0e131f] to-gray-900 border border-white/5">
+        <div 
+          style={transitionStyle}
+          className="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-gradient-to-br from-gray-950 via-[#0e131f] to-gray-900 border border-white/5"
+        >
           <div className="w-16 h-16 rounded-2xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-center mb-3 shadow-lg shadow-blue-500/5">
             <Film size={32} className="text-blue-400" />
           </div>
