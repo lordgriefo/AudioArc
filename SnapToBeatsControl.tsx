@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   Zap, SlidersHorizontal, Sparkles, Activity, Check, 
-  Flame, RefreshCw, X
+  Flame, RefreshCw, X, Magnet, RotateCcw, Scissors
 } from 'lucide-react';
 import { AudioBeatDrop, SnapToBeatsOptions, SnapResult } from './beatDetection';
 import { ScenePrompt } from './App';
@@ -25,6 +25,12 @@ interface SnapToBeatsControlProps {
   fitAudioDuration: boolean;
   onFitAudioDurationChange: (fit: boolean) => void;
   lastSnapStats?: SnapResult['stats'] | null;
+  enableVisualSnapping?: boolean;
+  onToggleVisualSnapping?: (enabled: boolean) => void;
+  onResetSceneBoundaries?: () => void;
+  canResetBoundaries?: boolean;
+  hasManualModifications?: boolean;
+  onOpenBeatSegmentation?: () => void;
 }
 
 export const SnapToBeatsControl: React.FC<SnapToBeatsControlProps> = ({
@@ -45,7 +51,13 @@ export const SnapToBeatsControl: React.FC<SnapToBeatsControlProps> = ({
   onMinSceneDurationChange,
   fitAudioDuration,
   onFitAudioDurationChange,
-  lastSnapStats
+  lastSnapStats,
+  enableVisualSnapping = true,
+  onToggleVisualSnapping,
+  onResetSceneBoundaries,
+  canResetBoundaries = false,
+  hasManualModifications = false,
+  onOpenBeatSegmentation
 }) => {
   const [showMenu, setShowMenu] = useState(false);
   const [justSnapped, setJustSnapped] = useState(false);
@@ -268,7 +280,28 @@ export const SnapToBeatsControl: React.FC<SnapToBeatsControlProps> = ({
             </div>
 
             {/* Toggles */}
-            <div className="pt-2 border-t border-white/10 space-y-2">
+            <div className="pt-2 border-t border-white/10 space-y-2.5">
+              {/* Visual Snapping for Manual Drag-and-Drop */}
+              {onToggleVisualSnapping && (
+                <label className="flex items-start justify-between cursor-pointer gap-2 bg-black/30 p-2 rounded-lg border border-cyan-500/20 hover:border-cyan-500/40 transition-colors">
+                  <div className="flex-1 pr-1">
+                    <div className="flex items-center gap-1.5 text-[11px] font-semibold text-cyan-200">
+                      <Magnet size={12} className={enableVisualSnapping ? "text-cyan-400" : "text-gray-500"} />
+                      <span>Visual Snapping on Drag</span>
+                    </div>
+                    <div className="text-[9px] text-gray-400 mt-0.5 leading-tight">
+                      Magnetically snaps manual drag-and-drop scene boundaries to beat peaks. Disable for sub-second fine-tuning.
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={enableVisualSnapping}
+                    onChange={e => onToggleVisualSnapping(e.target.checked)}
+                    className="accent-cyan-400 w-4 h-4 rounded cursor-pointer mt-0.5"
+                  />
+                </label>
+              )}
+
               <label className="flex items-center justify-between cursor-pointer">
                 <span className="text-[11px] text-gray-300">Fit entire audio track length</span>
                 <input
@@ -290,9 +323,66 @@ export const SnapToBeatsControl: React.FC<SnapToBeatsControlProps> = ({
               </label>
             </div>
 
+            {/* Revert / Reset Boundaries Action */}
+            {onResetSceneBoundaries && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onResetSceneBoundaries();
+                    setShowMenu(false);
+                  }}
+                  disabled={!canResetBoundaries}
+                  className={`w-full py-1.5 text-[10px] font-medium flex items-center justify-center gap-1.5 rounded border transition-colors ${
+                    hasManualModifications && canResetBoundaries
+                      ? 'bg-amber-950/50 border-amber-500/40 text-amber-300 hover:bg-amber-900/60'
+                      : canResetBoundaries
+                        ? 'bg-black/30 border-white/10 text-gray-300 hover:bg-white/10'
+                        : 'bg-black/20 border-white/5 text-gray-600 cursor-not-allowed opacity-50'
+                  }`}
+                  title="Revert all manual boundary adjustments to last detected beat state"
+                >
+                  <RotateCcw size={11} className={hasManualModifications ? "text-amber-400" : ""} />
+                  Reset Scene Boundaries
+                  {hasManualModifications && (
+                    <span className="text-[9px] px-1 rounded bg-amber-400/20 text-amber-300">
+                      Modified
+                    </span>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {/* Beat-Driven Scene Segmentation Tool */}
+            {onOpenBeatSegmentation && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenBeatSegmentation();
+                    setShowMenu(false);
+                  }}
+                  disabled={!canSnap}
+                  className="w-full py-2 px-2.5 rounded-lg border border-cyan-500/40 bg-gradient-to-r from-cyan-950/70 to-blue-950/70 hover:from-cyan-900/80 hover:to-blue-900/80 text-cyan-200 hover:text-white font-semibold text-xs flex items-center justify-between transition-all group/seg disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Automatically split long scenes at audio energy shifts and beat drops"
+                >
+                  <div className="flex items-center gap-2">
+                    <Scissors size={13} className="text-cyan-400 transform -rotate-45 group-hover/seg:scale-110 transition-transform" />
+                    <div className="text-left">
+                      <div className="leading-tight">Beat Segmentation</div>
+                      <div className="text-[9px] text-gray-400 font-normal">Split long scenes at intensity shifts</div>
+                    </div>
+                  </div>
+                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan-900/60 text-cyan-300 border border-cyan-500/30">
+                    Auto-Cut
+                  </span>
+                </button>
+              </div>
+            )}
+
             {/* Reanalyze Action */}
             {onReanalyze && (
-              <div className="pt-1">
+              <div className="pt-0.5">
                 <button
                   type="button"
                   onClick={() => {

@@ -11,10 +11,10 @@ import {
   ShieldCheck, AlertCircle, CopyPlus, FolderOpen,
   Terminal, Pencil, AlertTriangle, ScrollText,
   Undo, Redo, Undo2, Redo2, CheckCircle2, Info, ArrowUp, ArrowDown, CreditCard, ExternalLink, HelpCircle, Upload, Volume2, Smile, Palette, Layers,
-  Maximize2, Link as LinkIcon, Paperclip, Printer, User, Cloud, SkipBack, SkipForward,
+  Maximize2, Link as LinkIcon, Paperclip, Printer, User, Cloud,
   FileJson, FileArchive, VideoIcon, UserPlus, Cpu, BookOpen, Mic, Coffee, Key,
   SlidersHorizontal, BookmarkPlus, ArrowLeftRight, UserCheck, Tag, Compass, Bot, LayoutGrid, Merge, Contrast,
-  Eye, EyeOff, FileSpreadsheet
+  Eye, EyeOff, FileSpreadsheet, Menu, Smartphone, Scissors
 } from 'lucide-react';
 import JSZip from 'jszip';
 import * as idb from 'idb-keyval';
@@ -42,13 +42,10 @@ import {
   snapScenesToBeats, 
   extractIntensityFromAudioBuffer, 
   SnapToBeatsOptions, 
-  SnapResult 
+  SnapResult,
+  BeatSegmentationResult
 } from './beatDetection';
-import { 
-  SnapToBeatsControl, 
-  BeatMarkersOverlay, 
-  AudioIntensityWaveform 
-} from './SnapToBeatsControl';
+import { SnapToBeatsControl } from './SnapToBeatsControl';
 import { ColorGradeModal } from './ColorGradeModal';
 import { HeaderConnectionStatus } from './HeaderConnectionStatus';
 import { MultiTrackStudioView } from './MultiTrackStudioView';
@@ -57,6 +54,9 @@ import { MultiTrackProject } from './multiTrackTypes';
 import { buildMultiTrackFromStoryboard } from './multiTrackEngine';
 import { AIStyleRefinerModal } from './AIStyleRefinerModal';
 import { AIContrastBoosterModal } from './AIContrastBoosterModal';
+import { WaveformBoundaryEditor } from './WaveformBoundaryEditor';
+import { PWAInstallButton } from './PWAInstallButton';
+import { BeatSceneSegmentationModal } from './BeatSceneSegmentationModal';
 
 // --- Error Boundary ---
 declare global {
@@ -633,6 +633,12 @@ export const App: React.FC = () => {
   const [snapMinSceneDuration, setSnapMinSceneDuration] = useState<number>(1.5);
   const [snapFitAudioDuration, setSnapFitAudioDuration] = useState<boolean>(true);
   const [lastSnapResultStats, setLastSnapResultStats] = useState<SnapResult['stats'] | null>(null);
+  const [enableVisualSnapping, setEnableVisualSnapping] = useState<boolean>(true);
+  const [lastDetectedStoryboardState, setLastDetectedStoryboardState] = useState<ScenePrompt[] | null>(null);
+  const [hasManualBoundaryModifications, setHasManualBoundaryModifications] = useState<boolean>(false);
+  const [mobileActiveTab, setMobileActiveTab] = useState<'editor' | 'storyboard' | 'studio'>('editor');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+  const [showBeatSegmentationModal, setShowBeatSegmentationModal] = useState<boolean>(false);
   const [aiEditorCommand, setAiEditorCommand] = useState('');
   const [aiEditorLoading, setAiEditorLoading] = useState(false);
   const [imageIntegrationLevel, setImageIntegrationLevel] = useState<'low' | 'balanced' | 'high'>('balanced');
@@ -2217,12 +2223,62 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
     const synchronized = recalcTimeline(result.updatedStoryboard);
     setStoryboard(synchronized);
     setLastSnapResultStats(result.stats);
+    // Store snapshot of detected state for Reset Scene Boundaries
+    setLastDetectedStoryboardState(JSON.parse(JSON.stringify(synchronized)));
+    setHasManualBoundaryModifications(false);
 
     const dropImpactText = result.stats.majorDropsMatched > 0
       ? `${result.stats.majorDropsMatched} major drop impacts aligned!`
       : `aligned to rhythm peaks!`;
 
     setNotification(`⚡ Snapped ${result.stats.totalScenes} scenes to beats (${result.stats.snappedCutsCount} cuts ${dropImpactText}, avg ${result.stats.avgDuration}s)`);
+    setTimeout(() => setNotification(null), 4500);
+  };
+
+  const handleResetSceneBoundaries = () => {
+    if (!lastDetectedStoryboardState || lastDetectedStoryboardState.length === 0) {
+      setNotification("No detected beat state to revert to. Run 'Snap to Beats' first.");
+      setTimeout(() => setNotification(null), 3000);
+      return;
+    }
+    pushToHistory();
+    let reverted: ScenePrompt[];
+    if (storyboard && storyboard.length === lastDetectedStoryboardState.length) {
+      reverted = storyboard.map((scene, idx) => ({
+        ...scene,
+        duration: lastDetectedStoryboardState[idx].duration || 4
+      }));
+    } else {
+      reverted = JSON.parse(JSON.stringify(lastDetectedStoryboardState));
+    }
+    const synchronized = recalcTimeline(reverted);
+    setStoryboard(synchronized);
+    setHasManualBoundaryModifications(false);
+    setNotification("Reverted scene boundaries to last known detected beat state!");
+    setTimeout(() => setNotification(null), 3500);
+  };
+
+  const handleUpdateSceneBoundaries = (newScenes: ScenePrompt[], affectedIndexes: number[]) => {
+    pushToHistory();
+    const synchronized = recalcTimeline(newScenes);
+    setStoryboard(synchronized);
+    setHasManualBoundaryModifications(true);
+    if (affectedIndexes.length >= 2) {
+      const leftIdx = affectedIndexes[0];
+      const rightIdx = affectedIndexes[1];
+      const leftDur = (synchronized[leftIdx]?.duration || 0).toFixed(1);
+      const rightDur = (synchronized[rightIdx]?.duration || 0).toFixed(1);
+      setNotification(`Adjusted cut: Scene #${leftIdx + 1} (${leftDur}s) & Scene #${rightIdx + 1} (${rightDur}s)`);
+      setTimeout(() => setNotification(null), 2500);
+    }
+  };
+
+  const handleApplyBeatSegmentation = (result: BeatSegmentationResult) => {
+    pushToHistory();
+    const synchronized = recalcTimeline(result.updatedStoryboard);
+    setStoryboard(synchronized);
+    setHasManualBoundaryModifications(true);
+    setNotification(`⚡ Segmented ${result.stats.scenesSplitCount} scenes into ${result.stats.newSceneCount} clips (+${result.stats.totalNewClipsAdded} cuts on audio intensity shifts, avg ${result.stats.avgDurationAfter}s)`);
     setTimeout(() => setNotification(null), 4500);
   };
 
@@ -2370,14 +2426,11 @@ Keys: "lyric", "description", "imagePrompt", "videoPrompts", "soraPrompt", "grou
       }
   };
 
-  const handleVisualizerSeek = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!audioRef.current || audioDuration === 0) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const clickPosition = e.clientX - rect.left;
-    const percentage = clickPosition / rect.width;
-    const newTime = percentage * audioDuration;
-    audioRef.current.currentTime = newTime;
-    setCurrentTime(newTime);
+  const handleVisualizerSeekToSeconds = (seconds: number) => {
+    if (audioRef.current) {
+      audioRef.current.currentTime = seconds;
+    }
+    setCurrentTime(seconds);
   };
 
   const describeStoryboardDiff = (
@@ -5557,7 +5610,30 @@ ${JSON.stringify(simplifiedBatch, null, 2)}
               />
             </div>
             <div className="hidden md:block h-6 w-px bg-white/10"></div>
-            <div className="flex items-center gap-1">
+            
+            {/* PWA Install Button for Android, iPhone, and Desktop */}
+            <div className="flex items-center">
+              <PWAInstallButton compact />
+            </div>
+
+            {/* Mobile Header Quick Actions */}
+            <div className="flex md:hidden items-center gap-1">
+              <button onClick={handleUndo} disabled={historyStack.past.length === 0} className="p-1.5 rounded hover:bg-white/10 text-gray-300 disabled:opacity-30" title="Undo"><Undo size={16}/></button>
+              <button onClick={handleRedo} disabled={historyStack.future.length === 0} className="p-1.5 rounded hover:bg-white/10 text-gray-300 disabled:opacity-30" title="Redo"><Redo size={16}/></button>
+              <button onClick={handleManualSave} className="p-1.5 rounded hover:bg-white/10 text-gray-300" title="Save Project">
+                {saveStatus === 'saved' ? <Check size={16} className="text-green-400"/> : saveStatus === 'saving' ? <Loader2 size={16} className="animate-spin"/> : <Save size={16}/>}
+              </button>
+              <button 
+                onClick={() => setMobileMenuOpen(true)}
+                className="p-1.5 rounded bg-white/5 border border-white/10 text-gray-200 hover:text-white hover:bg-white/10 transition-colors"
+                title="Open Mobile Navigation Menu"
+              >
+                <Menu size={18} />
+              </button>
+            </div>
+
+            {/* Desktop Full Action Buttons */}
+            <div className="hidden md:flex items-center gap-1">
                 {storyboard && storyboard.length > 0 && (
                   <button onClick={() => setShowSceneNavigator(true)} className="p-2 rounded hover:bg-white/10 border border-transparent hover:border-white/10 transition-all text-blue-400 hover:text-blue-300" title="Scene Quick Navigator (Jump to any scene)"><Compass size={20}/></button>
                 )}
@@ -5590,8 +5666,181 @@ ${JSON.stringify(simplifiedBatch, null, 2)}
         </div>
       </header>
 
+      {/* Mobile Slide-Over Navigation Drawer */}
+      {mobileMenuOpen && (
+        <div 
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm md:hidden flex justify-end animate-in fade-in duration-200"
+          onClick={() => setMobileMenuOpen(false)}
+        >
+          <div 
+            className="w-4/5 max-w-xs h-full bg-[#121620] border-l border-white/10 p-5 shadow-2xl flex flex-col justify-between overflow-y-auto"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                <div className="flex items-center gap-2">
+                  <Clapperboard size={18} className="text-blue-500" />
+                  <span className="text-sm font-bold brand-font text-white">AudioArc Menu</span>
+                </div>
+                <button 
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Install PWA Prompt on mobile */}
+              <div className="bg-gradient-to-r from-cyan-950/60 to-blue-950/60 p-3 rounded-xl border border-cyan-500/30">
+                <div className="text-[11px] font-bold text-cyan-300 mb-1 flex items-center gap-1.5">
+                  <Smartphone size={13} /> Mobile App Version
+                </div>
+                <p className="text-[10px] text-gray-300 mb-2 leading-relaxed">
+                  Install AudioArc on your Android or iPhone for a native full-screen experience with touch-optimized waveform editing.
+                </p>
+                <PWAInstallButton />
+              </div>
+
+              <div className="space-y-1 text-xs">
+                {storyboard && storyboard.length > 0 && (
+                  <button 
+                    onClick={() => { setShowSceneNavigator(true); setMobileMenuOpen(false); }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                  >
+                    <Compass size={16} className="text-blue-400" />
+                    <span>Scene Quick Navigator</span>
+                  </button>
+                )}
+
+                <button 
+                  onClick={() => { handleTriggerImport(); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <FolderOpen size={16} className="text-cyan-400" />
+                  <span>Import Project</span>
+                </button>
+
+                <button 
+                  onClick={() => { handleExport('json'); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <Download size={16} className="text-emerald-400" />
+                  <span>Download Backup (.json)</span>
+                </button>
+
+                <button 
+                  onClick={() => { handleExportPDF(); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <Printer size={16} className="text-blue-400" />
+                  <span>Export PDF Storyboard</span>
+                </button>
+
+                <button 
+                  onClick={() => { setShowHistory(true); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <History size={16} className="text-amber-400" />
+                  <span>Project History</span>
+                </button>
+
+                <button 
+                  onClick={() => { setShowSavedScenes(true); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <Bookmark size={16} className="text-purple-400" />
+                  <span>Saved Scenes</span>
+                </button>
+
+                <button 
+                  onClick={() => { setShowResources(true); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <LinkIcon size={16} className="text-green-400" />
+                  <span>External Resources</span>
+                </button>
+
+                <button 
+                  onClick={() => { setShowSettings(true); setSettingsTab('billing'); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <Key size={16} className="text-yellow-400" />
+                  <span>API Keys & Connection</span>
+                </button>
+
+                <button 
+                  onClick={() => { setShowSettings(true); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <Settings size={16} className="text-gray-400" />
+                  <span>Director's Settings</span>
+                </button>
+
+                <button 
+                  onClick={() => { setShowManual(true); setMobileMenuOpen(false); }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-gray-200 hover:bg-white/10 text-left font-medium"
+                >
+                  <HelpCircle size={16} className="text-cyan-400" />
+                  <span>User Manual</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-4 border-t border-white/10 space-y-2">
+              <button 
+                onClick={() => { setShowResetConfirm(true); setMobileMenuOpen(false); }}
+                className="w-full py-2.5 rounded-xl border border-red-500/30 bg-red-950/30 text-red-400 font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2"
+              >
+                <RotateCcw size={12} />
+                <span>Reset Project</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex-1 overflow-y-auto relative z-10 custom-scrollbar">
-        <main className="grid grid-cols-1 md:grid-cols-12 gap-6 px-6 pt-6 pb-6 max-w-[1920px] mx-auto w-full min-h-full">
+        <main className="grid grid-cols-1 md:grid-cols-12 gap-6 px-4 sm:px-6 pt-4 sm:pt-6 pb-6 max-w-[1920px] mx-auto w-full min-h-full">
+            
+            {/* Mobile Tab Switcher */}
+            <div className="col-span-1 md:hidden flex items-center bg-[#121620] p-1 rounded-xl border border-white/10 shadow-lg">
+              <button
+                type="button"
+                onClick={() => setMobileActiveTab('editor')}
+                className={`flex-1 py-2 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-all ${
+                  mobileActiveTab === 'editor'
+                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+              >
+                <FileText size={13} />
+                <span>Script & Audio</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMobileActiveTab('storyboard')}
+                className={`flex-1 py-2 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-all ${
+                  mobileActiveTab === 'storyboard'
+                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+              >
+                <Film size={13} />
+                <span>Storyboard {storyboard && storyboard.length > 0 ? `(${storyboard.length})` : ''}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setMobileActiveTab('studio')}
+                className={`flex-1 py-2 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-all ${
+                  mobileActiveTab === 'studio'
+                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md'
+                    : 'text-gray-400 hover:text-white'
+                }`}
+              >
+                <Layers size={13} />
+                <span>Studio</span>
+              </button>
+            </div>
             
             {/* Quick Setup Banner: Prominently displayed if Gemini API key is missing on Vercel / standalone hosting */}
             {provider === 'gemini' && apiKeyStatus === 'not_found' && (
@@ -5689,7 +5938,7 @@ ${JSON.stringify(simplifiedBatch, null, 2)}
               </div>
             )}
 
-            <div className="md:col-span-4 flex flex-col gap-4">
+            <div className={`md:col-span-4 flex flex-col gap-4 ${mobileActiveTab === 'editor' ? 'flex' : 'hidden md:flex'}`}>
                 <div className="bg-[#121212] border border-white/10 rounded-xl p-1 flex flex-col shadow-2xl relative group shrink-0">
                     <div className="bg-white/5 px-4 py-3 rounded-t-lg flex justify-between items-center border-b border-white/5">
                         <label className="text-sm font-bold text-gray-300 uppercase tracking-wider flex items-center gap-2"> <FileText size={16} className="text-blue-500"/> Script / Lyrics </label>
@@ -5738,58 +5987,44 @@ The old city. The weeping wall. Let's all go and remember.
                                 <div className="w-8 h-8 rounded-full bg-green-900/30 flex items-center justify-center text-green-400 border border-green-500/30"> <Volume2 size={14}/> </div>
                                 <div className="flex-1 min-w-0"> <div className="text-xs text-white font-medium truncate">{audioFileName}</div> </div>
                             </div>
-                            <div className="relative h-16 bg-black/30 rounded-lg overflow-hidden border border-white/10 cursor-pointer select-none" onClick={handleVisualizerSeek}>
-                                {/* Waveform visualizer from audioIntensityData */}
-                                {audioIntensityData && (
-                                    <AudioIntensityWaveform audioIntensityData={audioIntensityData} uiThemeColor={uiThemeColor} />
-                                )}
+                            {/* Interactive Waveform & Scene Boundary Editor */}
+                            <WaveformBoundaryEditor
+                                audioIntensityData={audioIntensityData}
+                                frequencyData={frequencyData}
+                                audioDuration={audioDuration}
+                                currentTime={currentTime}
+                                isPlaying={isPlaying}
+                                onTogglePlayback={togglePlayback}
+                                onPrevScene={handlePrevScene}
+                                onNextScene={handleNextScene}
+                                storyboard={storyboard}
+                                detectedPeaks={detectedBeatDrops}
+                                showBeatMarkers={showBeatMarkers}
+                                onToggleBeatMarkers={setShowBeatMarkers}
+                                enableVisualSnapping={enableVisualSnapping}
+                                onToggleVisualSnapping={setEnableVisualSnapping}
+                                currentPlaybackIndex={currentPlaybackIndex}
+                                onSeek={handleVisualizerSeekToSeconds}
+                                onJumpToScene={jumpToScene}
+                                onUpdateSceneDurations={handleUpdateSceneBoundaries}
+                                onResetSceneBoundaries={handleResetSceneBoundaries}
+                                canResetBoundaries={!!lastDetectedStoryboardState && lastDetectedStoryboardState.length > 0}
+                                hasManualModifications={hasManualBoundaryModifications}
+                                onOpenBeatSegmentation={() => setShowBeatSegmentationModal(true)}
+                                uiThemeColor={uiThemeColor}
+                                formatTime={formatTime}
+                            />
 
-                                {/* Live dynamic playback frequency spectrum */}
-                                {frequencyData && (
-                                    <div className={`absolute inset-0 flex items-end justify-center gap-[1px] bg-gradient-to-t ${uiThemeColor} opacity-10 pointer-events-none`}>
-                                        {Array.from({ length: 128 }).map((_, i) => (
-                                            <div key={i} className={`w-full bg-gradient-to-t ${uiThemeColor}`} style={{ height: `${(frequencyData[i] / 255) * 80}%`, opacity: `${0.2 + (frequencyData[i] / 255) * 0.6}` }}/>
-                                        ))}
-                                    </div>
-                                )}
-
-                                {/* Beat & Drop markers overlay */}
-                                <BeatMarkersOverlay
-                                    detectedPeaks={detectedBeatDrops}
-                                    audioDuration={audioDuration}
-                                    showMarkers={showBeatMarkers}
-                                />
-
-                                {/* Storyboard scene segments */}
-                                {storyboard && audioDuration > 0 && (
-                                    <div className="absolute inset-0 flex z-10 pointer-events-auto">
-                                        {storyboard.map((scene, i) => (
-                                            <div
-                                                key={scene.id}
-                                                className={`h-full border-r border-white/20 transition-colors group ${currentPlaybackIndex === i ? 'bg-white/25' : 'bg-white/5 hover:bg-white/15'}`}
-                                                style={{ width: `${((scene.duration || 0) / audioDuration) * 100}%` }}
-                                                onClick={(e) => { e.stopPropagation(); jumpToScene(i); }}
-                                                title={`Scene ${i+1}: "${scene.lyric}" (${scene.duration || 4}s)`}
-                                            >
-                                                <div className="text-[9px] text-white/70 p-1 truncate group-hover:text-white transition-colors flex items-center justify-between">
-                                                    <span>{`#${i+1}`}</span>
-                                                    <span className="text-[8px] opacity-70 group-hover:opacity-100">{scene.duration || 4}s</span>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                                <div className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-20 pointer-events-none" style={{ left: `${audioDuration > 0 ? (currentTime / audioDuration) * 100 : 0}%` }}/>
-                            </div>
-                            <div className="flex items-center justify-between mt-1 gap-2 flex-wrap">
-                                <div className="flex items-center gap-2">
-                                    <button onClick={handlePrevScene} disabled={currentPlaybackIndex === 0} className="p-2 rounded-full bg-white/10 text-white flex items-center justify-center hover:bg-white/20 transition-colors disabled:opacity-30"> <SkipBack size={14} /> </button>
-                                    <button onClick={togglePlayback} className="w-8 h-8 rounded-full bg-white text-black flex items-center justify-center hover:bg-gray-200 transition-colors">
-                                        {isPlaying ? <Pause size={14} fill="currentColor"/> : <Play size={14} fill="currentColor" className="ml-0.5"/>}
-                                    </button>
-                                    <button onClick={handleNextScene} disabled={!storyboard || currentPlaybackIndex >= storyboard.length - 1} className="p-2 rounded-full bg-white/10 text-white flex items-center justify-center hover:bg-white/20 transition-colors disabled:opacity-30"> <SkipForward size={14} /> </button>
-
-                                    <div className="text-[10px] text-gray-500 font-mono ml-2"> {formatTime(currentTime)} / {formatTime(audioDuration)} </div>
+                            {/* Sub-toolbar: Peak drop summary & Snap To Beats Engine */}
+                            <div className="flex items-center justify-between pt-2 border-t border-white/5 flex-wrap gap-2">
+                                <div className="text-[10px] text-gray-500 font-mono flex items-center gap-1.5">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-400"></span>
+                                    <span>{detectedBeatDrops.length} beat peaks detected</span>
+                                    {lastSnapResultStats && (
+                                        <span className="text-gray-400 hidden sm:inline">
+                                            • {lastSnapResultStats.snappedCutsCount} cuts aligned
+                                        </span>
+                                    )}
                                 </div>
 
                                 <SnapToBeatsControl
@@ -5811,6 +6046,12 @@ The old city. The weeping wall. Let's all go and remember.
                                     fitAudioDuration={snapFitAudioDuration}
                                     onFitAudioDurationChange={setSnapFitAudioDuration}
                                     lastSnapStats={lastSnapResultStats}
+                                    enableVisualSnapping={enableVisualSnapping}
+                                    onToggleVisualSnapping={setEnableVisualSnapping}
+                                    onResetSceneBoundaries={handleResetSceneBoundaries}
+                                    canResetBoundaries={!!lastDetectedStoryboardState && lastDetectedStoryboardState.length > 0}
+                                    hasManualModifications={hasManualBoundaryModifications}
+                                    onOpenBeatSegmentation={() => setShowBeatSegmentationModal(true)}
                                 />
                             </div>
                             <audio key={audioUrl} ref={audioRef} src={audioUrl || undefined} className="hidden" onTimeUpdate={onAudioTimeUpdate} onLoadedMetadata={onAudioLoadedMetadata} onEnded={onAudioEnded} />
@@ -5852,7 +6093,60 @@ The old city. The weeping wall. Let's all go and remember.
                 </div>
             </div>
 
-            <div className="md:col-span-8 flex flex-col gap-6 min-w-0 max-w-full">
+            {/* Mobile Studio Tab View */}
+            {mobileActiveTab === 'studio' && (
+              <div className="md:hidden col-span-1 flex flex-col gap-4">
+                <div className="bg-[#121620] border border-cyan-500/30 rounded-xl p-5 shadow-xl">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Layers size={16} className="text-cyan-400" />
+                      <span>Multi-Track Studio</span>
+                    </h3>
+                    <button
+                      onClick={() => {
+                        setStoryboardViewMode('multitrack');
+                        setMobileActiveTab('storyboard');
+                        if (!multiTrackProject && storyboard) {
+                          setMultiTrackProject(buildMultiTrackFromStoryboard(storyboard, audioUrl, audioDuration, visualRefs));
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-gradient-to-r from-cyan-600 to-blue-600 text-white rounded-lg text-xs font-bold shadow-md active:scale-95 transition-transform"
+                    >
+                      Open Studio View
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-300 mb-4 leading-relaxed">
+                    Arrange audio layers, video prompt generations, voiceovers, and sound effects across a multi-track DAW timeline on your device.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      onClick={() => {
+                        setStoryboardViewMode('multitrack');
+                        setMobileActiveTab('storyboard');
+                        if (!multiTrackProject && storyboard) {
+                          setMultiTrackProject(buildMultiTrackFromStoryboard(storyboard, audioUrl, audioDuration, visualRefs));
+                        }
+                      }}
+                      className="p-3.5 bg-black/40 border border-white/10 rounded-xl hover:border-cyan-400/50 flex flex-col items-center justify-center text-center gap-2 transition-colors active:scale-95"
+                    >
+                      <Layers size={22} className="text-cyan-400" />
+                      <span className="text-xs font-bold text-gray-200">Timeline Studio</span>
+                      <span className="text-[10px] text-gray-400">Audio & Scene Tracks</span>
+                    </button>
+                    <button
+                      onClick={() => setShowAnimaticModal(true)}
+                      className="p-3.5 bg-black/40 border border-white/10 rounded-xl hover:border-blue-400/50 flex flex-col items-center justify-center text-center gap-2 transition-colors active:scale-95"
+                    >
+                      <Film size={22} className="text-blue-400" />
+                      <span className="text-xs font-bold text-gray-200">Render Animatic</span>
+                      <span className="text-[10px] text-gray-400">Video Preview Player</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className={`md:col-span-8 flex flex-col gap-6 min-w-0 max-w-full ${mobileActiveTab === 'storyboard' ? 'flex' : 'hidden md:flex'}`}>
                 <div className="bg-[#121212] rounded-xl border border-white/10 shadow-xl overflow-hidden flex flex-col min-h-[180px] shrink-0">
                     <div className="bg-white/5 px-4 py-3 border-b border-white/5 flex justify-between items-center shrink-0">
                         <div className="flex flex-col">
@@ -6208,10 +6502,16 @@ The old city. The weeping wall. Let's all go and remember.
                                     </button>
 
                                     {audioIntensityData && (
-                                        <button onClick={() => handleSnapToBeats()} className="flex items-center gap-1 px-2.5 py-1 bg-cyan-950/80 text-cyan-300 border border-cyan-500/40 rounded-md text-[10px] hover:bg-cyan-900/60 font-bold transition-all uppercase whitespace-nowrap" title="Snap scene durations to audio peak drops">
-                                            <Zap size={11} className="text-amber-400 fill-amber-400"/> 
-                                            <span>Snap Beats</span>
-                                        </button>
+                                        <>
+                                            <button onClick={() => handleSnapToBeats()} className="flex items-center gap-1 px-2.5 py-1 bg-cyan-950/80 text-cyan-300 border border-cyan-500/40 rounded-md text-[10px] hover:bg-cyan-900/60 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="Snap scene durations to audio peak drops">
+                                                <Zap size={11} className="text-amber-400 fill-amber-400"/> 
+                                                <span>Snap Beats</span>
+                                            </button>
+                                            <button onClick={() => setShowBeatSegmentationModal(true)} className="flex items-center gap-1 px-2.5 py-1 bg-pink-950/80 text-pink-300 border border-pink-500/40 rounded-md text-[10px] hover:bg-pink-900/60 font-bold transition-all uppercase whitespace-nowrap shadow-sm" title="Beat-Driven Scene Segmentation: Split long scenes at intensity shifts">
+                                                <Scissors size={11} className="text-pink-400"/> 
+                                                <span>Beat Split</span>
+                                            </button>
+                                        </>
                                     )}
                                 </div>
 
@@ -8282,6 +8582,16 @@ The old city. The weeping wall. Let's all go and remember.
         }}
         isAiConfigured={Boolean(provider === 'gemini' ? getEffectiveGeminiKey() : true)}
         initialFocusSceneIndex={contrastBoosterFocusSceneIndex}
+      />
+
+      <BeatSceneSegmentationModal
+        isOpen={showBeatSegmentationModal}
+        onClose={() => setShowBeatSegmentationModal(false)}
+        storyboard={storyboard || []}
+        audioIntensityData={audioIntensityData}
+        audioDuration={audioDuration}
+        detectedPeaks={detectedBeatDrops}
+        onApplySegmentation={handleApplyBeatSegmentation}
       />
 
       {showAnimaticModal && (

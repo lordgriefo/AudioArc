@@ -493,3 +493,455 @@ export function snapScenesToBeats(
     matchedDrops
   };
 }
+
+// ---------------------------------------------------------------------------
+// Beat-Driven Scene Segmentation Engine
+// ---------------------------------------------------------------------------
+
+export interface BeatSegmentationOptions {
+  minSceneDurationToSplit?: number; // Minimum scene length in seconds to be eligible for split (default: 4.0s)
+  minSubClipDuration?: number;      // Minimum length of each resulting subclip in seconds (default: 1.5s)
+  sensitivity?: number;              // 0 to 100 (default: 50) - sensitivity to audio intensity shifts and drops
+  cameraPacingVariation?: 'dynamic_kinetic' | 'angle_alternation' | 'whip_pan_action' | 'preserve_original';
+  maxSplitsPerScene?: number;       // 1 (splits in 2) or 2 (splits in 3), default: 1
+  onlySelectedScenes?: boolean;     // If true, only split scenes where isSelected is true
+}
+
+export interface IntensityShiftPoint {
+  time: number;                  // Timestamp in seconds
+  relativeTime: number;          // Offset in seconds from scene start
+  intensity: number;             // Raw intensity (0-255)
+  shiftMagnitude: number;        // Shift prominence or attack surge (0-1)
+  isDrop: boolean;
+  type: 'drop' | 'surge' | 'breakdown' | 'peak';
+  description: string;
+}
+
+export interface SceneSplitPreviewItem {
+  originalSceneIndex: number;
+  originalSceneId: string;
+  originalLyric: string;
+  startTime: number;
+  endTime: number;
+  duration: number;
+  willSplit: boolean;
+  shiftPoints: IntensityShiftPoint[];
+  resultingSubClips: Array<{
+    duration: number;
+    startTime: string;
+    endTime: string;
+    label: string;
+    cameraMovement?: string;
+  }>;
+  reason?: string;
+}
+
+export interface BeatSegmentationResult {
+  updatedStoryboard: ScenePrompt[];
+  stats: {
+    originalSceneCount: number;
+    newSceneCount: number;
+    scenesSplitCount: number;
+    totalNewClipsAdded: number;
+    avgDurationBefore: number;
+    avgDurationAfter: number;
+    totalDuration: number;
+    majorDropsUtilized: number;
+  };
+  splitDetails: SceneSplitPreviewItem[];
+}
+
+function generateLocalUUID(): string {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  return 'seg_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now().toString(36);
+}
+
+const CAMERA_CHOREOGRAPHY_PRESETS = {
+  dynamic_kinetic: [
+    'Wide establishing tracking shot',
+    'Dynamic rapid push-in crash zoom on the beat drop',
+    'Handheld kinetic pan following rhythmic shift'
+  ],
+  angle_alternation: [
+    'Wide panoramic master shot',
+    'Dramatic medium close-up shot focused on performer',
+    'Low-angle hero perspective shot'
+  ],
+  whip_pan_action: [
+    'Smooth dolly-in track',
+    'High-speed whip pan cut syncing to the audio surge',
+    'Fast Dutch-angle tilt on the breakdown'
+  ],
+  preserve_original: []
+};
+
+/**
+ * Analyzes storyboard scenes and audio data to identify scenes that exceed
+ * the duration threshold and contain significant audio intensity shifts.
+ */
+export function previewBeatSegmentation(
+  storyboard: ScenePrompt[],
+  audioIntensityData: number[] | null,
+  audioDuration: number,
+  detectedPeaks: AudioBeatDrop[],
+  options: BeatSegmentationOptions = {}
+): SceneSplitPreviewItem[] {
+  if (!storyboard || storyboard.length === 0) return [];
+
+  const {
+    minSceneDurationToSplit = 4.0,
+    minSubClipDuration = 1.5,
+    sensitivity = 50,
+    cameraPacingVariation = 'dynamic_kinetic',
+    maxSplitsPerScene = 1,
+    onlySelectedScenes = false
+  } = options;
+
+  const secondsPerPoint = (audioIntensityData && audioIntensityData.length > 0 && audioDuration > 0)
+    ? audioDuration / audioIntensityData.length
+    : 0.1;
+
+  // Track statistical profile for thresholding
+  let meanIntensity = 100;
+  if (audioIntensityData && audioIntensityData.length > 0) {
+    let sum = 0;
+    for (let i = 0; i < audioIntensityData.length; i++) sum += audioIntensityData[i];
+    meanIntensity = sum / audioIntensityData.length;
+  }
+
+  // Calculate cumulative scene time boundaries
+  let cumulativeTime = 0;
+  const previews: SceneSplitPreviewItem[] = [];
+
+  for (let idx = 0; idx < storyboard.length; idx++) {
+    const scene = storyboard[idx];
+    const dur = Math.max(1, scene.duration || 4);
+    const sceneStart = cumulativeTime;
+    const sceneEnd = cumulativeTime + dur;
+    cumulativeTime = sceneEnd;
+
+    // Check basic eligibility
+    if (onlySelectedScenes && !scene.isSelected) {
+      previews.push({
+        originalSceneIndex: idx,
+        originalSceneId: scene.id,
+        originalLyric: scene.lyric,
+        startTime: sceneStart,
+        endTime: sceneEnd,
+        duration: dur,
+        willSplit: false,
+        shiftPoints: [],
+        resultingSubClips: [{
+          duration: dur,
+          startTime: formatTimecode(sceneStart),
+          endTime: formatTimecode(sceneEnd),
+          label: `Scene #${idx + 1}`
+        }],
+        reason: 'Scene not selected'
+      });
+      continue;
+    }
+
+    if (dur < minSceneDurationToSplit) {
+      previews.push({
+        originalSceneIndex: idx,
+        originalSceneId: scene.id,
+        originalLyric: scene.lyric,
+        startTime: sceneStart,
+        endTime: sceneEnd,
+        duration: dur,
+        willSplit: false,
+        shiftPoints: [],
+        resultingSubClips: [{
+          duration: dur,
+          startTime: formatTimecode(sceneStart),
+          endTime: formatTimecode(sceneEnd),
+          label: `Scene #${idx + 1}`
+        }],
+        reason: `Duration (${dur.toFixed(1)}s) is below split threshold (${minSceneDurationToSplit}s)`
+      });
+      continue;
+    }
+
+    // Search window inside scene that guarantees each sub-clip is at least minSubClipDuration
+    const validWindowStart = sceneStart + minSubClipDuration;
+    const validWindowEnd = sceneEnd - minSubClipDuration;
+
+    if (validWindowEnd <= validWindowStart) {
+      previews.push({
+        originalSceneIndex: idx,
+        originalSceneId: scene.id,
+        originalLyric: scene.lyric,
+        startTime: sceneStart,
+        endTime: sceneEnd,
+        duration: dur,
+        willSplit: false,
+        shiftPoints: [],
+        resultingSubClips: [{
+          duration: dur,
+          startTime: formatTimecode(sceneStart),
+          endTime: formatTimecode(sceneEnd),
+          label: `Scene #${idx + 1}`
+        }],
+        reason: 'Scene duration too short for two minimum clips'
+      });
+      continue;
+    }
+
+    // 1. Check for detected peaks and major drops inside this window
+    const candidateShifts: IntensityShiftPoint[] = [];
+
+    if (detectedPeaks && detectedPeaks.length > 0) {
+      for (const peak of detectedPeaks) {
+        if (peak.time >= validWindowStart && peak.time <= validWindowEnd) {
+          const rel = peak.time - sceneStart;
+          candidateShifts.push({
+            time: peak.time,
+            relativeTime: Math.round(rel * 10) / 10,
+            intensity: peak.intensity,
+            shiftMagnitude: peak.surge > 0 ? peak.surge : (peak.intensity / 255),
+            isDrop: peak.isDrop,
+            type: peak.isDrop ? 'drop' : (peak.surge >= 0.2 ? 'surge' : 'peak'),
+            description: peak.isDrop 
+              ? `⚡ Major Drop at ${formatTimecode(peak.time)} (+${Math.round(peak.surge * 100)}% surge)`
+              : `• Beat Peak at ${formatTimecode(peak.time)} (Energy: ${peak.intensity})`
+          });
+        }
+      }
+    }
+
+    // 2. Also check raw intensity data for steep gradient jumps/drops not flagged as peaks
+    if (audioIntensityData && audioIntensityData.length > 0) {
+      const startIndex = Math.max(0, Math.floor(validWindowStart / secondsPerPoint));
+      const endIndex = Math.min(audioIntensityData.length - 1, Math.ceil(validWindowEnd / secondsPerPoint));
+
+      // Sensitivity factor: 0 (strict, 0.40 shift) to 100 (sensitive, 0.15 shift)
+      const shiftThreshold = Math.max(0.12, 0.40 - (sensitivity / 100) * 0.28);
+
+      for (let i = startIndex + 2; i <= endIndex - 2; i += 2) {
+        const t = Math.round((i * secondsPerPoint) * 10) / 10;
+        if (t < validWindowStart || t > validWindowEnd) continue;
+
+        // Skip if very close to an already identified candidate peak (< 0.8s)
+        const closeToExisting = candidateShifts.some(c => Math.abs(c.time - t) < 0.8);
+        if (closeToExisting) continue;
+
+        const currentVal = audioIntensityData[i];
+        const prevVal = audioIntensityData[Math.max(0, i - 4)]; // 0.4s prior
+        const delta = (currentVal - prevVal) / 255;
+
+        if (delta >= shiftThreshold && currentVal >= meanIntensity * 0.7) {
+          candidateShifts.push({
+            time: t,
+            relativeTime: Math.round((t - sceneStart) * 10) / 10,
+            intensity: currentVal,
+            shiftMagnitude: Math.round(delta * 100) / 100,
+            isDrop: delta >= 0.25,
+            type: delta >= 0.25 ? 'surge' : 'peak',
+            description: `📈 Energy Surge at ${formatTimecode(t)} (+${Math.round(delta * 100)}% shift)`
+          });
+        }
+      }
+    }
+
+    // Sort candidate shifts by magnitude and priority (drops first, then largest surge)
+    candidateShifts.sort((a, b) => {
+      if (a.isDrop !== b.isDrop) return a.isDrop ? -1 : 1;
+      return b.shiftMagnitude - a.shiftMagnitude;
+    });
+
+    // Enforce minimum distance between multiple split points in the same scene
+    const selectedPoints: IntensityShiftPoint[] = [];
+    for (const cand of candidateShifts) {
+      if (selectedPoints.length >= maxSplitsPerScene) break;
+      const tooClose = selectedPoints.some(p => Math.abs(p.time - cand.time) < minSubClipDuration);
+      if (!tooClose) {
+        selectedPoints.push(cand);
+      }
+    }
+
+    // If no candidate shifts were detected, check if scene is very long (> 7.0s)
+    // and split at midway beat drop or golden ratio
+    if (selectedPoints.length === 0 && dur >= 7.0) {
+      const midTime = Math.round((sceneStart + dur * 0.5) * 10) / 10;
+      selectedPoints.push({
+        time: midTime,
+        relativeTime: Math.round((midTime - sceneStart) * 10) / 10,
+        intensity: Math.round(meanIntensity),
+        shiftMagnitude: 0.25,
+        isDrop: false,
+        type: 'surge',
+        description: `Tempo rebalance cut at ${formatTimecode(midTime)}`
+      });
+    }
+
+    if (selectedPoints.length === 0) {
+      previews.push({
+        originalSceneIndex: idx,
+        originalSceneId: scene.id,
+        originalLyric: scene.lyric,
+        startTime: sceneStart,
+        endTime: sceneEnd,
+        duration: dur,
+        willSplit: false,
+        shiftPoints: [],
+        resultingSubClips: [{
+          duration: dur,
+          startTime: formatTimecode(sceneStart),
+          endTime: formatTimecode(sceneEnd),
+          label: `Scene #${idx + 1}`
+        }],
+        reason: 'No significant audio intensity shift found inside scene bounds'
+      });
+      continue;
+    }
+
+    // Sort selected split points chronologically
+    selectedPoints.sort((a, b) => a.time - b.time);
+
+    // Build preview sub-clips
+    const subClips: Array<{
+      duration: number;
+      startTime: string;
+      endTime: string;
+      label: string;
+      cameraMovement?: string;
+    }> = [];
+
+    const cutTimes = [sceneStart, ...selectedPoints.map(p => p.time), sceneEnd];
+    const cameraPresets = CAMERA_CHOREOGRAPHY_PRESETS[cameraPacingVariation] || [];
+
+    for (let c = 0; c < cutTimes.length - 1; c++) {
+      const clipStart = cutTimes[c];
+      const clipEnd = cutTimes[c + 1];
+      const clipDur = Math.round((clipEnd - clipStart) * 10) / 10;
+      const subIndex = String.fromCharCode(65 + c); // A, B, C...
+
+      let cameraMovement = scene.cameraMovement;
+      if (cameraPresets.length > 0) {
+        cameraMovement = cameraPresets[c % cameraPresets.length];
+      }
+
+      subClips.push({
+        duration: clipDur,
+        startTime: formatTimecode(clipStart),
+        endTime: formatTimecode(clipEnd),
+        label: `Scene #${idx + 1}${subIndex}`,
+        cameraMovement
+      });
+    }
+
+    previews.push({
+      originalSceneIndex: idx,
+      originalSceneId: scene.id,
+      originalLyric: scene.lyric,
+      startTime: sceneStart,
+      endTime: sceneEnd,
+      duration: dur,
+      willSplit: true,
+      shiftPoints: selectedPoints,
+      resultingSubClips: subClips
+    });
+  }
+
+  return previews;
+}
+
+/**
+ * Executes beat-driven scene segmentation on a storyboard.
+ * Splits scenes when significant intensity shifts or drops are detected.
+ */
+export function segmentStoryboardByBeats(
+  storyboard: ScenePrompt[],
+  audioIntensityData: number[] | null,
+  audioDuration: number,
+  detectedPeaks: AudioBeatDrop[],
+  options: BeatSegmentationOptions = {}
+): BeatSegmentationResult {
+  const previews = previewBeatSegmentation(
+    storyboard,
+    audioIntensityData,
+    audioDuration,
+    detectedPeaks,
+    options
+  );
+
+  const updatedStoryboard: ScenePrompt[] = [];
+  let scenesSplitCount = 0;
+  let totalNewClipsAdded = 0;
+  let majorDropsUtilized = 0;
+
+  for (const item of previews) {
+    const original = storyboard[item.originalSceneIndex] || storyboard.find(s => s.id === item.originalSceneId);
+    if (!original) continue;
+
+    if (!item.willSplit || item.resultingSubClips.length <= 1) {
+      updatedStoryboard.push({ ...original });
+      continue;
+    }
+
+    scenesSplitCount++;
+    totalNewClipsAdded += (item.resultingSubClips.length - 1);
+
+    item.shiftPoints.forEach(sp => {
+      if (sp.isDrop) majorDropsUtilized++;
+    });
+
+    // Create sub-clips
+    for (let c = 0; c < item.resultingSubClips.length; c++) {
+      const subInfo = item.resultingSubClips[c];
+      const partLetter = String.fromCharCode(65 + c);
+      const isFirstClip = c === 0;
+
+      // Retain or adapt prompts
+      const partDescription = original.description 
+        ? `${original.description} [Clip ${partLetter} - ${subInfo.cameraMovement || 'Dynamic Cut'}]`
+        : original.description;
+
+      const subScene: ScenePrompt = {
+        ...original,
+        id: isFirstClip ? original.id : generateLocalUUID(),
+        duration: subInfo.duration,
+        startTime: subInfo.startTime,
+        endTime: subInfo.endTime,
+        cameraMovement: subInfo.cameraMovement || original.cameraMovement,
+        description: partDescription,
+        // For subclips, append a part tag to lyric if lyric is present
+        lyric: original.lyric ? `${original.lyric} (${partLetter})` : original.lyric,
+        // Retain generated image on the first clip, let user regenerate for subsequent sub-clips
+        generatedImage: isFirstClip ? original.generatedImage : undefined,
+        imageFilename: isFirstClip ? original.imageFilename : undefined,
+        videoStatus: 'idle',
+        videoUrl: undefined
+      };
+
+      updatedStoryboard.push(subScene);
+    }
+  }
+
+  // Recalculate timestamps to ensure exact cumulative alignment
+  const synchronized = recalculateSceneTimestamps(updatedStoryboard);
+
+  let totalDurBefore = 0;
+  storyboard.forEach(s => totalDurBefore += (s.duration || 4));
+  let totalDurAfter = 0;
+  synchronized.forEach(s => totalDurAfter += (s.duration || 4));
+
+  return {
+    updatedStoryboard: synchronized,
+    stats: {
+      originalSceneCount: storyboard.length,
+      newSceneCount: synchronized.length,
+      scenesSplitCount,
+      totalNewClipsAdded,
+      avgDurationBefore: roundToPrecision(totalDurBefore / storyboard.length, 0.1),
+      avgDurationAfter: roundToPrecision(totalDurAfter / synchronized.length, 0.1),
+      totalDuration: roundToPrecision(totalDurAfter, 0.1),
+      majorDropsUtilized
+    },
+    splitDetails: previews
+  };
+}
+
