@@ -21,6 +21,19 @@ export interface ColorGradeProfile {
   bestForKeywords: string[];
 }
 
+export interface AppliedColorGradeMeta {
+  profileId: string;
+  name: string;
+  category: string;
+  badge?: string;
+  swatches: ColorPaletteSwatch[];
+  colorTemperature?: string;
+  contrast?: string;
+  clause: string;
+  appliedAt?: string;
+  source?: 'profile' | 'ai-recommendation' | 'prompt-detected';
+}
+
 export interface ColorGradingRecommendation {
   sceneId: string;
   sceneIndex: number;
@@ -336,6 +349,116 @@ export function applyColorGradeToPrompt(originalPrompt: string, gradeDirective: 
 
   // Seamlessly join with standard cinematic prompt syntax
   return `${cleaned}. ${gradeDirective}.`;
+}
+
+/**
+ * Strips any existing Color grading / LUT directive from an image prompt.
+ */
+export function removeColorGradeFromPrompt(originalPrompt: string): string {
+  if (!originalPrompt) return '';
+  const colorGradingRegex = /(?:[.,]\s*)?(?:Color grading|Color grade|Color palette|Colour grading|LUT):[^.]+(?:\.)?/gi;
+  return originalPrompt.replace(colorGradingRegex, '').trim().replace(/[.,]\s*$/, '');
+}
+
+const PROFILE_SIGNATURE_KEYWORDS: Array<{ profileId: string; markers: string[] }> = [
+  { profileId: 'kodak-vision3-500t', markers: ['kodak vision3 500t', 'vision3 500t', '5219'] },
+  { profileId: 'teal-orange-blockbuster', markers: ['teal and orange', 'teal & orange'] },
+  { profileId: 'bleach-bypass-enr', markers: ['bleach bypass', 'silver retention', 'enr film process'] },
+  { profileId: 'technicolor-3-strip', markers: ['technicolor 3-strip', 'technicolor 3 strip', 'three-strip technicolor'] },
+  { profileId: 'kodak-kodachrome-64', markers: ['kodachrome 64', 'kodak kodachrome'] },
+  { profileId: 'fuji-pro-400h', markers: ['fuji pro 400h', 'pastel bloom', 'mint green shadow wash'] },
+  { profileId: 'cyberpunk-neon-wash', markers: ['cyberpunk neon color grade', 'cyberpunk neon wash', 'radioactive cyan rim'] },
+  { profileId: 'midnight-cyan-sodium', markers: ['sodium-vapor amber', 'sodium vapor amber', 'midnight cyan & sodium'] },
+  { profileId: 'kodak-tri-x-400', markers: ['kodak tri-x 400', 'silver gelatin film emulation', 'tri-x 400'] },
+  { profileId: 'solarized-golden-hour', markers: ['golden hour magic hour', 'solarized golden hour', 'honeyed golden light'] },
+  { profileId: 'wong-kar-wai-emerald', markers: ['wong kar-wai', 'christopher doyle lighting', 'jade-emerald fluorescent'] },
+  { profileId: 'cross-processed-e6', markers: ['cross-processed e-6', 'cross processed e-6', 'c-41 chemicals'] },
+  { profileId: 'nordic-noir-steel', markers: ['nordic noir', 'cold steel-blue color grade'] },
+  { profileId: 'vintage-16mm-indie', markers: ['16mm bolex', '16mm vintage indie sepia', 'sepia-tinted nostalgic'] },
+];
+
+/**
+ * Extracts and resolves the applied color grade for a scene—using explicit metadata
+ * when available and falling back to inspecting the scene's imagePrompt text.
+ */
+export function detectAppliedColorGrade(scene: ScenePrompt): AppliedColorGradeMeta | null {
+  const prompt = (scene.imagePrompt || '').trim();
+  const promptLower = prompt.toLowerCase();
+
+  // Extract explicit clause from prompt if present
+  const clauseMatch = prompt.match(/(?:Color grading|Color grade|Color palette|Colour grading|LUT):[^.]+/i);
+  const extractedClause = clauseMatch ? clauseMatch[0].trim() : '';
+
+  // 1. Prefer explicit metadata attached to the scene if present
+  if (scene.appliedColorGrade) {
+    // If prompt still contains a grading clause or matches, trust stored metadata
+    if (!prompt || promptLower.includes('color grad') || promptLower.includes('lut:') || promptLower.includes(scene.appliedColorGrade.name.toLowerCase().split(' ')[0])) {
+      return {
+        ...scene.appliedColorGrade,
+        clause: extractedClause || scene.appliedColorGrade.clause,
+      };
+    }
+  }
+
+  if (!prompt) return null;
+
+  // 2. Match against built-in CINEMATIC_COLOR_PROFILES via directive or signature keywords
+  for (const profile of CINEMATIC_COLOR_PROFILES) {
+    if (promptLower.includes(profile.promptDirective.toLowerCase())) {
+      return {
+        profileId: profile.id,
+        name: profile.name,
+        category: profile.category,
+        badge: profile.badge,
+        swatches: profile.swatches,
+        colorTemperature: profile.colorTemperature,
+        contrast: profile.contrast,
+        clause: extractedClause || profile.promptDirective,
+        source: 'prompt-detected',
+      };
+    }
+  }
+
+  for (const sig of PROFILE_SIGNATURE_KEYWORDS) {
+    if (sig.markers.some((m) => promptLower.includes(m))) {
+      const matched = CINEMATIC_COLOR_PROFILES.find((p) => p.id === sig.profileId);
+      if (matched) {
+        return {
+          profileId: matched.id,
+          name: matched.name,
+          category: matched.category,
+          badge: matched.badge,
+          swatches: matched.swatches,
+          colorTemperature: matched.colorTemperature,
+          contrast: matched.contrast,
+          clause: extractedClause || matched.promptDirective,
+          source: 'prompt-detected',
+        };
+      }
+    }
+  }
+
+  // 3. Fallback: custom "Color grading: ..." clause written manually or by AI
+  if (extractedClause) {
+    return {
+      profileId: 'custom-grade',
+      name: 'Custom Prompt Grade',
+      category: 'custom',
+      badge: 'Custom LUT',
+      swatches: [
+        { hex: '#1e293b', name: 'Shadow', role: 'shadows' },
+        { hex: '#475569', name: 'Midtone', role: 'midtones' },
+        { hex: '#94a3b8', name: 'Highlight', role: 'highlights' },
+        { hex: '#a855f7', name: 'Custom Accent', role: 'accent' },
+      ],
+      colorTemperature: 'Custom Prompt Specification',
+      contrast: 'Prompt-Defined',
+      clause: extractedClause,
+      source: 'prompt-detected',
+    };
+  }
+
+  return null;
 }
 
 /**

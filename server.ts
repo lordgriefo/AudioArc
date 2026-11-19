@@ -71,20 +71,107 @@ app.post('/api/gemini/ping', async (req, res) => {
   }
 });
 
+// Helper: extract clean, readable error text from SDK errors
+function formatGeminiError(err: any, fallbackMsg: string): string {
+  const raw = String(err?.message || err || fallbackMsg);
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed?.error?.message) {
+      return `${parsed.error.message}${parsed.error.status ? ` (${parsed.error.status})` : ''}`;
+    }
+  } catch {}
+  return raw;
+}
+
+// Helper: if inlineData exceeds ~10MB base64, upload via Gemini Files API to avoid 20MB inline payload limits
+async function normalizeContentsForGemini(ai: GoogleGenAI, contents: any): Promise<{ contents: any; uploadedFileNames: string[] }> {
+  const uploadedFileNames: string[] = [];
+  if (!contents || !Array.isArray(contents.parts)) {
+    return { contents, uploadedFileNames };
+  }
+
+  const INLINE_THRESHOLD = 10 * 1024 * 1024; // ~7.5MB binary / ~10MB base64
+  const nextParts = [];
+
+  for (const part of contents.parts) {
+    if (part?.inlineData?.data && typeof part.inlineData.data === 'string' && part.inlineData.data.length > INLINE_THRESHOLD) {
+      const mimeType = part.inlineData.mimeType || 'audio/mpeg';
+      const buffer = Buffer.from(part.inlineData.data, 'base64');
+      const blob = new Blob([buffer], { type: mimeType });
+      const uploaded = await ai.files.upload({
+        file: blob,
+        config: { mimeType },
+      });
+      if (uploaded?.name) {
+        uploadedFileNames.push(uploaded.name);
+      }
+      if (uploaded?.uri) {
+        nextParts.push({
+          fileData: {
+            fileUri: uploaded.uri,
+            mimeType: uploaded.mimeType || mimeType,
+          },
+        });
+        continue;
+      }
+    }
+    nextParts.push(part);
+  }
+
+  return {
+    contents: { ...contents, parts: nextParts },
+    uploadedFileNames,
+  };
+}
+
+function shouldFallbackModel(err: any): boolean {
+  const errMsg = String(err?.message || err || '');
+  return (
+    errMsg.includes('503') ||
+    errMsg.includes('high demand') ||
+    errMsg.includes('UNAVAILABLE') ||
+    errMsg.includes('429') ||
+    errMsg.includes('RESOURCE_EXHAUSTED') ||
+    errMsg.includes('404') ||
+    errMsg.includes('NOT_FOUND')
+  );
+}
+
 // Generate Content endpoint (handles text, structured JSON, multimodal inputs)
 app.post('/api/gemini/generate-content', async (req, res) => {
+  const ai = getGenAI();
+  let uploadedFileNames: string[] = [];
+
   try {
-    const { model = 'gemini-3.8-flash', contents, config } = req.body;
+    const { model = 'gemini-3.1-flash-lite', contents, config } = req.body;
     if (!contents) {
       return res.status(400).json({ error: 'Missing required "contents" in request body' });
     }
 
-    const ai = getGenAI();
-    const response = await ai.models.generateContent({
-      model,
-      contents,
-      config,
-    });
+    const normalized = await normalizeContentsForGemini(ai, contents);
+    const preparedContents = normalized.contents;
+    uploadedFileNames = normalized.uploadedFileNames;
+
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model,
+        contents: preparedContents,
+        config,
+      });
+    } catch (modelErr: any) {
+      if (shouldFallbackModel(modelErr)) {
+        const fallbackModel = model !== 'gemini-3.1-flash-lite' ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen';
+        console.warn(`[Gemini Server] ${model} failed (${formatGeminiError(modelErr, '').substring(0, 100)}). Auto-falling back to ${fallbackModel}...`);
+        response = await ai.models.generateContent({
+          model: fallbackModel,
+          contents: preparedContents,
+          config,
+        });
+      } else {
+        throw modelErr;
+      }
+    }
 
     res.json({
       text: response.text || '',
@@ -94,16 +181,23 @@ app.post('/api/gemini/generate-content', async (req, res) => {
   } catch (err: any) {
     console.error('Gemini generateContent error:', err);
     res.status(500).json({
-      error: err.message || 'Gemini generate content failed',
+      error: formatGeminiError(err, 'Gemini generate content failed'),
       details: err.toString(),
     });
+  } finally {
+    for (const fileName of uploadedFileNames) {
+      ai.files.delete({ name: fileName }).catch(() => {});
+    }
   }
 });
 
 // Streaming Content endpoint using Server-Sent Events (SSE)
 app.post('/api/gemini/generate-content-stream', async (req, res) => {
+  const ai = getGenAI();
+  let uploadedFileNames: string[] = [];
+
   try {
-    const { model = 'gemini-3.8-flash', contents, config } = req.body;
+    const { model = 'gemini-3.1-flash-lite', contents, config } = req.body;
     if (!contents) {
       return res.status(400).json({ error: 'Missing required "contents" in request body' });
     }
@@ -113,12 +207,30 @@ app.post('/api/gemini/generate-content-stream', async (req, res) => {
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders?.();
 
-    const ai = getGenAI();
-    const stream = await ai.models.generateContentStream({
-      model,
-      contents,
-      config,
-    });
+    const normalized = await normalizeContentsForGemini(ai, contents);
+    const preparedContents = normalized.contents;
+    uploadedFileNames = normalized.uploadedFileNames;
+
+    let stream;
+    try {
+      stream = await ai.models.generateContentStream({
+        model,
+        contents: preparedContents,
+        config,
+      });
+    } catch (modelErr: any) {
+      if (shouldFallbackModel(modelErr)) {
+        const fallbackModel = model !== 'gemini-3.1-flash-lite' ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen';
+        console.warn(`[Gemini Server Stream] ${model} unavailable. Auto-falling back to ${fallbackModel}...`);
+        stream = await ai.models.generateContentStream({
+          model: fallbackModel,
+          contents: preparedContents,
+          config,
+        });
+      } else {
+        throw modelErr;
+      }
+    }
 
     for await (const chunk of stream) {
       const dataPayload = {
@@ -132,11 +244,16 @@ app.post('/api/gemini/generate-content-stream', async (req, res) => {
     res.end();
   } catch (err: any) {
     console.error('Gemini streaming error:', err);
+    const readableError = formatGeminiError(err, 'Gemini streaming failed');
     if (!res.headersSent) {
-      res.status(500).json({ error: err.message || 'Gemini streaming failed' });
+      res.status(500).json({ error: readableError });
     } else {
-      res.write(`data: ${JSON.stringify({ error: err.message || 'Stream encountered error' })}\n\n`);
+      res.write(`data: ${JSON.stringify({ error: readableError })}\n\n`);
       res.end();
+    }
+  } finally {
+    for (const fileName of uploadedFileNames) {
+      ai.files.delete({ name: fileName }).catch(() => {});
     }
   }
 });
@@ -210,61 +327,70 @@ app.post('/api/gemini/generate-images', async (req, res) => {
   }
 });
 
-// Video Generation endpoint
+// Video Generation endpoint (uses Gemini Interactions API with gemini-omni-1.2-flash)
 app.post('/api/gemini/generate-videos', async (req, res) => {
   try {
-    const { prompt, model = 'veo-3.1-fast-generate-preview', config } = req.body;
+    const { prompt, imageBase64, model = 'gemini-omni-1.2-flash', config = {} } = req.body;
     if (!prompt) {
       return res.status(400).json({ error: 'Prompt is required for video generation' });
     }
 
     const ai = getGenAI();
-    let operation = await ai.models.generateVideos({
+
+    // Support resolution tiers: 360p (Cheapest Economy - 8 credits/10s), 720p (Standard - 16 credits), 1080p (Cinematic - 32 credits)
+    const targetResolution = config.resolution || '360p';
+    const targetDuration = config.duration || '10s';
+    const targetAspectRatio = config.aspectRatio || '16:9';
+
+    // Prepare inputs: text motion prompt, optionally with starting image frame
+    const inputParts: any[] = [];
+    if (imageBase64) {
+      const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
+      inputParts.push({
+        type: 'image',
+        mime_type: 'image/png',
+        data: cleanBase64,
+      });
+    }
+    inputParts.push({
+      type: 'text',
+      text: prompt,
+    });
+
+    const interaction = await ai.interactions.create({
       model,
-      prompt,
-      config: config || {
-        numberOfVideos: 1,
-        resolution: '720p',
-        aspectRatio: '16:9',
+      input: inputParts.length === 1 ? prompt : inputParts,
+      background: false,
+      store: false,
+      stream: false,
+      response_format: {
+        type: 'video',
+        aspect_ratio: targetAspectRatio,
+        duration: targetDuration,
+        resolution: targetResolution,
       },
-    });
+    }, { timeout: 300000 });
 
-    // Poll until operation is complete
-    while (!operation.done) {
-      await new Promise((resolve) => setTimeout(resolve, 5000));
-      operation = await ai.operations.getVideosOperation({ operation });
+    const videoPart = interaction.output_video;
+    if (videoPart && videoPart.data) {
+      const mime = videoPart.mime_type || 'video/mp4';
+      const videoUrl = `data:${mime};base64,${videoPart.data}`;
+      const creditsCost = targetResolution === '360p' ? 8 : (targetResolution === '1080p' ? 32 : 16);
+      return res.json({ videoUrl, prompt, resolution: targetResolution, duration: targetDuration, creditsCost });
     }
 
-    if (operation.error) {
-      throw new Error(String(operation.error.message));
-    }
-
-    const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
-    if (!downloadLink) {
-      throw new Error('Video generation completed, but no download link was provided.');
-    }
-
-    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || '';
-    const videoResponse = await fetch(downloadLink, {
-      method: 'GET',
-      headers: {
-        'x-goog-api-key': apiKey,
-      },
-    });
-
-    if (!videoResponse.ok) {
-      throw new Error(`Failed to download video stream: ${videoResponse.statusText}`);
-    }
-
-    const arrayBuffer = await videoResponse.arrayBuffer();
-    const base64Data = Buffer.from(arrayBuffer).toString('base64');
-    const videoUrl = `data:video/mp4;base64,${base64Data}`;
-
-    res.json({ videoUrl });
+    throw new Error('Video generation completed, but no video output stream was returned.');
   } catch (err: any) {
     console.error('Gemini video generation error:', err);
-    res.status(500).json({
-      error: err.message || 'Video generation failed',
+    const errMsg = String(err?.message || err);
+    const isPaidKeyRequired = errMsg.includes('403') || errMsg.includes('paid') || errMsg.includes('permission');
+    
+    res.status(isPaidKeyRequired ? 403 : 500).json({
+      error: isPaidKeyRequired 
+        ? 'Direct video rendering with Gemini Omni Flash requires a paid API key. You can copy the generated video prompt and use it directly with Runway Gen-3, Sora, Kling, or LTX Studio!'
+        : (err.message || 'Video generation failed'),
+      prompt: req.body?.prompt || '',
+      requiresPaidKey: isPaidKeyRequired,
     });
   }
 });

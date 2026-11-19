@@ -3,15 +3,14 @@
 
 export const AI_MODELS = {
   main: [
-    'gemini-3.8-flash',           // Latest default Flash model (fast, high quality)
-    'gemini-3.1-flash-lite',       // Flash-Lite: ultra-fast, less expensive option
-    'gemini-3.1-pro-preview',      // Pro: advanced reasoning & complex scripting
-    'gemini-flash-latest',         // Latest production Flash alias
+    'gemini-4-hydrogen',           // Latest default Flash model (fast, balanced, free-tier ready)
+    'gemini-3.1-flash-lite',       // Flash-Lite: ultra-fast, lowest quota usage
+    'gemini-4-argon',              // Pro: advanced reasoning & complex scripting (paid key)
+    'gemini-4-carbon',             // Deep reasoning & complex architectural planning (paid key)
   ],
   utility: [
-    'gemini-3.1-flash-lite',       // Flash-Lite: lowest cost, high speed for analysis
-    'gemini-3.8-flash',           // Default Flash: balanced utility analysis
-    'gemini-flash-latest',
+    'gemini-3.1-flash-lite',       // Flash-Lite: lowest cost, high speed for audio & analysis
+    'gemini-4-hydrogen',           // Flash: balanced utility analysis
   ],
   image: {
       gemini: [
@@ -28,10 +27,10 @@ export const AI_MODELS = {
 
 export const AI_MODEL_LABELS: Record<string, string> = {
   // Main & Utility Models
-  'gemini-3.8-flash': 'gemini-3.8-flash (Recommended · Fast & Balanced)',
-  'gemini-3.1-flash-lite': 'gemini-3.1-flash-lite (Flash-Lite · Lowest Cost / High Speed)',
-  'gemini-3.1-pro-preview': 'gemini-3.1-pro-preview (Pro · Deep Reasoning & Complexity)',
-  'gemini-flash-latest': 'gemini-flash-latest (Latest Flash Alias)',
+  'gemini-4-hydrogen': 'gemini-4-hydrogen (Recommended · Fast & Balanced)',
+  'gemini-3.1-flash-lite': 'gemini-3.1-flash-lite (Flash-Lite · Lowest Cost / Free-Tier Friendly)',
+  'gemini-4-argon': 'gemini-4-argon (Pro · Complex Reasoning · Paid Key)',
+  'gemini-4-carbon': 'gemini-4-carbon (Carbon · Deep Reasoning · Paid Key)',
   // Gemini Image Models ("Nano Banana" series)
   'gemini-3.1-flash-image': 'gemini-3.1-flash-image (Nano Banana 2 · High Quality 1K-4K)',
   'gemini-3.1-flash-lite-image': 'gemini-3.1-flash-lite-image (Nano Banana 2 Lite · Fast & Economical)',

@@ -162,9 +162,16 @@ export async function generateImageServer(params: {
  */
 export async function generateVideoServer(params: {
   prompt: string;
+  imageBase64?: string;
   model?: string;
-  config?: any;
-}): Promise<{ videoUrl: string }> {
+  config?: {
+    resolution?: '360p' | '720p' | '1080p';
+    duration?: '5s' | '10s';
+    aspectRatio?: '16:9' | '9:16' | '1:1';
+    numberOfVideos?: number;
+    [key: string]: any;
+  };
+}): Promise<{ videoUrl: string; prompt?: string; resolution?: string; duration?: string; creditsCost?: number }> {
   const response = await fetch('/api/gemini/generate-videos', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

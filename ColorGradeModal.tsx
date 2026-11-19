@@ -10,6 +10,7 @@ import {
   ColorGradeProfile, 
   ColorGradingRecommendation, 
   ProjectStyleAnalysis, 
+  AppliedColorGradeMeta,
   CINEMATIC_COLOR_PROFILES, 
   applyColorGradeToPrompt, 
   recommendColorGradeForScene,
@@ -228,6 +229,18 @@ export const ColorGradeModal: React.FC<ColorGradeModalProps> = ({
     setTimeout(() => setAnalysisProgress(''), 2500);
   };
 
+  const buildGradeMetaFromRec = (rec: ColorGradingRecommendation): AppliedColorGradeMeta => ({
+    profileId: rec.filterId,
+    name: rec.filterName,
+    category: rec.category,
+    swatches: rec.swatches,
+    colorTemperature: rec.colorTemperature,
+    contrast: rec.contrastProfile,
+    clause: rec.colorGradingClause,
+    appliedAt: new Date().toISOString(),
+    source: 'ai-recommendation',
+  });
+
   // Apply recommendation to a single scene
   const handleApplySingleScene = (sceneId: string) => {
     const rec = recommendations[sceneId];
@@ -237,7 +250,8 @@ export const ColorGradeModal: React.FC<ColorGradeModalProps> = ({
       if (s.id === sceneId) {
         return {
           ...s,
-          imagePrompt: rec.recommendedImagePrompt
+          imagePrompt: rec.recommendedImagePrompt,
+          appliedColorGrade: buildGradeMetaFromRec(rec),
         };
       }
       return s;
@@ -254,8 +268,9 @@ export const ColorGradeModal: React.FC<ColorGradeModalProps> = ({
 
     const newStoryboard = storyboard.map(s => {
       if (s.id === sceneId) {
+        const { appliedColorGrade: _removed, ...rest } = s;
         return {
-          ...s,
+          ...rest,
           imagePrompt: original
         };
       }
@@ -279,7 +294,8 @@ export const ColorGradeModal: React.FC<ColorGradeModalProps> = ({
       if (rec) {
         return {
           ...s,
-          imagePrompt: rec.recommendedImagePrompt
+          imagePrompt: rec.recommendedImagePrompt,
+          appliedColorGrade: buildGradeMetaFromRec(rec),
         };
       }
       return s;
@@ -299,7 +315,8 @@ export const ColorGradeModal: React.FC<ColorGradeModalProps> = ({
         if (rec) {
           return {
             ...s,
-            imagePrompt: rec.recommendedImagePrompt
+            imagePrompt: rec.recommendedImagePrompt,
+            appliedColorGrade: buildGradeMetaFromRec(rec),
           };
         }
       }
@@ -317,8 +334,9 @@ export const ColorGradeModal: React.FC<ColorGradeModalProps> = ({
     const newStoryboard = storyboard.map(s => {
       const orig = originalPromptsCache[s.id];
       if (orig) {
+        const { appliedColorGrade: _removed, ...rest } = s;
         return {
-          ...s,
+          ...rest,
           imagePrompt: orig
         };
       }
@@ -380,7 +398,19 @@ export const ColorGradeModal: React.FC<ColorGradeModalProps> = ({
 
       return {
         ...s,
-        imagePrompt: updatedPrompt
+        imagePrompt: updatedPrompt,
+        appliedColorGrade: {
+          profileId: profile.id,
+          name: profile.name,
+          category: profile.category,
+          badge: profile.badge,
+          swatches: profile.swatches,
+          colorTemperature: profile.colorTemperature,
+          contrast: profile.contrast,
+          clause: profile.promptDirective,
+          appliedAt: new Date().toISOString(),
+          source: 'profile' as const,
+        },
       };
     });
 
